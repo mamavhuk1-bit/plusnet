@@ -23,6 +23,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import org.json.JSONObject
+import org.json.JSONTokener
 
 data class PaymentItem(val date: String, val bill: String, val receive: String, val remarks: String)
 data class DailyUsage(val label: String, val download: Float, val upload: Float)
@@ -48,7 +50,6 @@ data class DailyUsage(val label: String, val download: Float, val upload: Float)
 data class PlusnetState(
     val isLoggedIn: Boolean = false,
     val isSyncing: Boolean = false,
-    val statusText: String = "Connecting...",
     val fullName: String = "Customer",
     val email: String = "",
     val userName: String = "",
@@ -60,7 +61,6 @@ data class PlusnetState(
     val expiryDate: String = "--",
     val planRate: String = "--",
     val payments: List<PaymentItem> = emptyList(),
-    val monthlyChartTitle: String = "Monthly Usage",
     val dailyUsage: List<DailyUsage> = emptyList(),
     val downSpeed: String = "0.0 Mbps",
     val upSpeed: String = "0.0 Mbps",
@@ -82,254 +82,40 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PlusnetNativeApp() {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("plusnet_native_v3", Context.MODE_PRIVATE) }
+    val prefs = remember { context.getSharedPreferences("plusnet_native_v4", Context.MODE_PRIVATE) }
 
     var savedUser by remember { mutableStateOf(prefs.getString("user", "") ?: "") }
     var savedPass by remember { mutableStateOf(prefs.getString("pass", "") ?: "") }
     var state by remember {
         mutableStateOf(
             PlusnetState(
-                isLoggedIn = savedUser.isNotEmpty() && savedPass.isNotEmpty(),
-                isSyncing = savedUser.isNotEmpty()
+                isLoggedIn = false,
+                isSyncing = savedUser.isNotEmpty() && savedPass.isNotEmpty()
             )
         )
     }
     var selectedTab by remember { mutableIntStateOf(0) }
     var loginError by remember { mutableStateOf<String?>(null) }
     var hiddenWebView by remember { mutableStateOf<WebView?>(null) }
-    var fetchTarget by remember { mutableStateOf("dashboard") }
+    var loginAttemptCount by remember { mutableIntStateOf(0) }
 
-    // Background Headless Engine to execute JS, Highcharts, and Live AJAX
-    AndroidView(
-        modifier = Modifier.size(0.dp),
-        factory = { ctx ->
-            WebView(ctx).apply {
-                val cm = CookieManager.getInstance()
-                cm.setAcceptCookie(true)
-                cm.setAcceptThirdPartyCookies(this, true)
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    databaseEnabled = true
-                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
-                }
-
-                webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        CookieManager.getInstance().flush()
-                        val u = prefs.getString("user", "") ?: ""
-                        val p = prefs.getString("pass", "") ?: ""
-
-                        if (url != null && url.contains("/login")) {
-                            if (u.isNotEmpty() && p.isNotEmpty()) {
-                                val jsLogin = """
-                                    (function() {
-                                        var uInput = document.querySelector('input[type="text"], input[type="email"], input[name*="user"], input[name*="email"]');
-                                        var pInput = document.querySelector('input[type="password"]');
-                                        var btn = document.querySelector('button[type="submit"], input[type="submit"], button');
-                                        if (uInput && pInput) {
-                                            uInput.value = ${JSONObject.quote(u)};
-                                            uInput.dispatchEvent(new Event('input', { bubbles: true }));
-                                            pInput.value = ${JSONObject.quote(p)};
-                                            pInput.dispatchEvent(new Event('input', { bubbles: true }));
-                                            setTimeout(function() { if (btn) btn.click(); }, 400);
-                                        }
-                                    })();
-                                """.trimIndent()
-                                view?.evaluateJavascript(jsLogin, null)
-                            }
-                        } else if (url != null && url.contains("/dashboard")) {
-                            // Wait 2.2s for JS/AJAX/Highcharts to render then extract all DOM data
-                            view?.postDelayed({
-                                val extractDashJs = """
-                                    (function() {
-                                        var text = document.body.innerText || "";
-                                        function findAfter(label) {
-                                            var idx = text.indexOf(label);
-                                            if (idx === -1) return "";
-                                            var sub = text.substring(idx + label.length).trim();
-                                            return sub.split('\n')[0].trim();
-                                        }
-                                        var pkg = findAfter("PACKAGE") || "Basic+PIP";
-                                        var acc = findAfter("Account Status") || (text.includes("Active") ? "Active" : "Inactive");
-                                        var conn = findAfter("Connection Status") || (text.includes("ONLINE") ? "ONLINE" : "OFFLINE");
-                                        var exp = findAfter("Expiry Date") || "--";
-                                        var rate = findAfter("Plan rate") || "--";
-
-                                        var uName = findAfter("User Name:");
-                                        var mob = findAfter("Mobile:");
-                                        var cid = findAfter("ID:");
-
-                                        var lines = text.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                                        var fName = "";
-                                        var mail = "";
-                                        for (var i = 0; i < lines.length; i++) {
-                                            if (lines[i].includes("@") && lines[i].includes(".")) {
-                                                mail = lines[i];
-                                                if (i > 0) fName = lines[i-1];
-                                                break;
-                                            }
-                                        }
-
-                                        var rows = [];
-                                        document.querySelectorAll("table tr").forEach(function(tr, index) {
-                                            if (index === 0) return;
-                                            var tds = tr.querySelectorAll("td");
-                                            if (tds.length >= 4) {
-                                                rows.push({
-                                                    date: tds[0].innerText.trim(),
-                                                    bill: tds[1].innerText.trim(),
-                                                    receive: tds[2].innerText.trim(),
-                                                    remarks: tds[3].innerText.trim()
-                                                });
-                                            }
-                                        });
-
-                                        var chartData = [];
-                                        if (window.Highcharts && Highcharts.charts) {
-                                            Highcharts.charts.forEach(function(c) {
-                                                if (c && c.series && c.series.length >= 1) {
-                                                    var cats = (c.xAxis && c.xAxis[0] && c.xAxis[0].categories) ? c.xAxis[0].categories : [];
-                                                    var s0 = c.series[0].data || [];
-                                                    var s1 = (c.series.length > 1) ? c.series[1].data : [];
-                                                    for (var k = 0; k < s0.length; k++) {
-                                                        chartData.push({
-                                                            label: cats[k] || (s0[k].name || ("" + (k+1))),
-                                                            down: s0[k].y || 0,
-                                                            up: (s1[k] ? (s1[k].y || 0) : 0)
-                                                        });
-                                                    }
-                                                }
-                                            });
-                                        }
-
-                                        return JSON.stringify({
-                                            pkg: pkg, acc: acc, conn: conn, exp: exp, rate: rate,
-                                            fullName: fName, email: mail, userName: uName, mobile: mob, cid: cid,
-                                            payments: rows, chart: chartData
-                                        });
-                                    })();
-                                """.trimIndent()
-
-                                view.evaluateJavascript(extractDashJs) { raw ->
-                                    try {
-                                        val clean = JSONObject.wrap(raw)?.toString() ?: raw
-                                        val unquoted = org.json.JSONTokener(raw).nextValue().toString()
-                                        val obj = JSONObject(unquoted)
-
-                                        val payList = mutableListOf<PaymentItem>()
-                                        val pArr = obj.optJSONArray("payments")
-                                        if (pArr != null) {
-                                            for (i in 0 until pArr.length()) {
-                                                val item = pArr.getJSONObject(i)
-                                                payList.add(
-                                                    PaymentItem(
-                                                        date = item.optString("date"),
-                                                        bill = item.optString("bill"),
-                                                        receive = item.optString("receive"),
-                                                        remarks = item.optString("remarks")
-                                                    )
-                                                )
-                                            }
-                                        }
-
-                                        val usageList = mutableListOf<DailyUsage>()
-                                        val cArr = obj.optJSONArray("chart")
-                                        if (cArr != null) {
-                                            for (i in 0 until cArr.length()) {
-                                                val cItem = cArr.getJSONObject(i)
-                                                usageList.add(
-                                                    DailyUsage(
-                                                        label = cItem.optString("label"),
-                                                        download = cItem.optDouble("down", 0.0).toFloat(),
-                                                        upload = cItem.optDouble("up", 0.0).toFloat()
-                                                    )
-                                                )
-                                            }
-                                        }
-
-                                        state = state.copy(
-                                            isLoggedIn = true,
-                                            isSyncing = false,
-                                            packageName = obj.optString("pkg").ifEmpty { state.packageName },
-                                            accountStatus = obj.optString("acc").ifEmpty { "Active" },
-                                            connectionStatus = obj.optString("conn").ifEmpty { "ONLINE" },
-                                            expiryDate = obj.optString("exp").ifEmpty { state.expiryDate },
-                                            planRate = obj.optString("rate").ifEmpty { state.planRate },
-                                            fullName = obj.optString("fullName").ifEmpty { state.fullName },
-                                            email = obj.optString("email").ifEmpty { state.email },
-                                            userName = obj.optString("userName").ifEmpty { u },
-                                            mobile = obj.optString("mobile").ifEmpty { state.mobile },
-                                            customerId = obj.optString("cid").ifEmpty { state.customerId },
-                                            payments = if (payList.isNotEmpty()) payList else state.payments,
-                                            dailyUsage = if (usageList.isNotEmpty()) usageList else state.dailyUsage
-                                        )
-                                        loginError = null
-                                        // Now fetch live report page in background
-                                        view.loadUrl("https://care.plus.net.bd/customer/report")
-                                    } catch (_: Exception) {
-                                        state = state.copy(isSyncing = false)
-                                    }
-                                }
-                            }, 2500)
-                        } else if (url != null && url.contains("/report")) {
-                            view?.postDelayed({
-                                val extractReportJs = """
-                                    (function() {
-                                        var text = document.body.innerText || "";
-                                        var speeds = text.match(/(\d+\.?\d*\s*(?:Mbps|Kbps|MB\/s|KB\/s|bps))/gi) || [];
-                                        var usages = text.match(/(\d+\.?\d*\s*(?:GB|MB|TB|KB))/gi) || [];
-                                        return JSON.stringify({
-                                            downSpd: speeds[0] || "0.0 Mbps",
-                                            upSpd: speeds[1] || "0.0 Mbps",
-                                            sessDown: usages[0] || "0 MB",
-                                            sessUp: usages[1] || "0 MB"
-                                        });
-                                    })();
-                                """.trimIndent()
-
-                                view.evaluateJavascript(extractReportJs) { raw ->
-                                    try {
-                                        val unquoted = org.json.JSONTokener(raw).nextValue().toString()
-                                        val obj = JSONObject(unquoted)
-                                        val dSpd = obj.optString("downSpd", "0.0 Mbps")
-                                        val uSpd = obj.optString("upSpd", "0.0 Mbps")
-                                        val num = Regex("(\\d+\\.?\\d*)").find(dSpd)?.groupValues?.get(1)?.toFloatOrNull() ?: 5f
-                                        val updatedHist = (state.liveSpeedHistory + num).takeLast(12)
-
-                                        state = state.copy(
-                                            isSyncing = false,
-                                            downSpeed = dSpd,
-                                            upSpeed = uSpd,
-                                            sessionDownload = obj.optString("sessDown", "0 MB"),
-                                            sessionUpload = obj.optString("sessUp", "0 MB"),
-                                            liveSpeedHistory = updatedHist
-                                        )
-                                    } catch (_: Exception) {
-                                        state = state.copy(isSyncing = false)
-                                    }
-                                }
-                            }, 2500)
-                        }
-                    }
-                }
-
-                hiddenWebView = this
-                if (savedUser.isNotEmpty() && savedPass.isNotEmpty()) {
-                    loadUrl("https://care.plus.net.bd/customer/dashboard")
-                }
+    // Safety timeout so loading spinner never gets stuck
+    LaunchedEffect(state.isSyncing) {
+        if (state.isSyncing) {
+            delay(16000)
+            if (state.isSyncing && !state.isLoggedIn) {
+                state = state.copy(isSyncing = false)
+                loginError = "Login timeout. Check credentials or internet and try again."
             }
         }
-    )
+    }
 
     // Auto refresh live data every 12 seconds when logged in
     LaunchedEffect(state.isLoggedIn) {
         while (state.isLoggedIn) {
             delay(12000)
-            fetchTarget = if (selectedTab == 0) "dashboard" else "report"
-            hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/$fetchTarget")
+            val target = if (selectedTab == 0) "dashboard" else "report"
+            hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/$target")
         }
     }
 
@@ -341,7 +127,261 @@ fun PlusnetNativeApp() {
     val greenOnline = Color(0xFF10B981)
     val orangeUpload = Color(0xFFF97316)
 
-    Surface(modifier = Modifier.fillMaxSize(), color = bgDark) {
+    Box(modifier = Modifier.fillMaxSize().background(bgDark)) {
+        // Active 1dp Background WebView (never suspended by Android OS)
+        AndroidView(
+            modifier = Modifier.size(1.dp).alpha(0.01f),
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    val cm = CookieManager.getInstance()
+                    cm.setAcceptCookie(true)
+                    cm.setAcceptThirdPartyCookies(this, true)
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        databaseEnabled = true
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                    }
+
+                    webViewClient = object : WebViewClient() {
+                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                            if (request?.isForMainFrame == true) {
+                                state = state.copy(isSyncing = false)
+                                loginError = "Network error: ${error?.description ?: "Unable to connect"}"
+                            }
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            CookieManager.getInstance().flush()
+                            val u = prefs.getString("user", "") ?: ""
+                            val p = prefs.getString("pass", "") ?: ""
+
+                            if (url != null && url.contains("/login")) {
+                                if (u.isNotEmpty() && p.isNotEmpty()) {
+                                    if (loginAttemptCount >= 2) {
+                                        state = state.copy(isSyncing = false)
+                                        loginError = "Invalid User Name or Password"
+                                        return
+                                    }
+                                    loginAttemptCount++
+                                    view?.postDelayed({
+                                        val jsLogin = """
+                                            (function() {
+                                                function setNativeValue(el, value) {
+                                                    var lastValue = el.value;
+                                                    el.value = value;
+                                                    var event = new Event('input', { bubbles: true });
+                                                    var tracker = el._valueTracker;
+                                                    if (tracker) { tracker.setValue(lastValue); }
+                                                    el.dispatchEvent(event);
+                                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                                }
+                                                var inputs = Array.from(document.querySelectorAll('input'));
+                                                var pInput = inputs.find(i => i.type === 'password');
+                                                var uInput = inputs.find(i => i.type === 'text' || i.type === 'email' || (!i.type && i !== pInput));
+                                                if (uInput && pInput) {
+                                                    uInput.focus();
+                                                    setNativeValue(uInput, ${JSONObject.quote(u)});
+                                                    pInput.focus();
+                                                    setNativeValue(pInput, ${JSONObject.quote(p)});
+                                                    setTimeout(function() {
+                                                        var btn = document.querySelector('button[type="submit"], input[type="submit"], button');
+                                                        if (btn) {
+                                                            btn.click();
+                                                        } else if (pInput.form) {
+                                                            pInput.form.submit();
+                                                        }
+                                                    }, 500);
+                                                }
+                                            })();
+                                        """.trimIndent()
+                                        view.evaluateJavascript(jsLogin, null)
+                                    }, 1200)
+                                }
+                            } else if (url != null && url.contains("/dashboard")) {
+                                loginAttemptCount = 0
+                                view?.postDelayed({
+                                    val extractDashJs = """
+                                        (function() {
+                                            var text = document.body.innerText || "";
+                                            function findAfter(label) {
+                                                var idx = text.indexOf(label);
+                                                if (idx === -1) return "";
+                                                var sub = text.substring(idx + label.length).trim();
+                                                return sub.split('\n')[0].trim();
+                                            }
+                                            var pkg = findAfter("PACKAGE") || "Basic+PIP";
+                                            var acc = findAfter("Account Status") || (text.includes("Active") ? "Active" : "Inactive");
+                                            var conn = findAfter("Connection Status") || (text.includes("ONLINE") ? "ONLINE" : "OFFLINE");
+                                            var exp = findAfter("Expiry Date") || "--";
+                                            var rate = findAfter("Plan rate") || "--";
+
+                                            var uName = findAfter("User Name:");
+                                            var mob = findAfter("Mobile:");
+                                            var cid = findAfter("ID:");
+
+                                            var lines = text.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                                            var fName = "";
+                                            var mail = "";
+                                            for (var i = 0; i < lines.length; i++) {
+                                                if (lines[i].includes("@") && lines[i].includes(".")) {
+                                                    mail = lines[i];
+                                                    if (i > 0) fName = lines[i-1];
+                                                    break;
+                                                }
+                                            }
+
+                                            var rows = [];
+                                            document.querySelectorAll("table tr").forEach(function(tr, index) {
+                                                if (index === 0) return;
+                                                var tds = tr.querySelectorAll("td");
+                                                if (tds.length >= 4) {
+                                                    rows.push({
+                                                        date: tds[0].innerText.trim(),
+                                                        bill: tds[1].innerText.trim(),
+                                                        receive: tds[2].innerText.trim(),
+                                                        remarks: tds[3].innerText.trim()
+                                                    });
+                                                }
+                                            });
+
+                                            var chartData = [];
+                                            if (window.Highcharts && Highcharts.charts) {
+                                                Highcharts.charts.forEach(function(c) {
+                                                    if (c && c.series && c.series.length >= 1) {
+                                                        var cats = (c.xAxis && c.xAxis[0] && c.xAxis[0].categories) ? c.xAxis[0].categories : [];
+                                                        var s0 = c.series[0].data || [];
+                                                        var s1 = (c.series.length > 1) ? c.series[1].data : [];
+                                                        for (var k = 0; k < s0.length; k++) {
+                                                            chartData.push({
+                                                                label: cats[k] || (s0[k].name || ("" + (k+1))),
+                                                                down: s0[k].y || 0,
+                                                                up: (s1[k] ? (s1[k].y || 0) : 0)
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                            }
+
+                                            return JSON.stringify({
+                                                pkg: pkg, acc: acc, conn: conn, exp: exp, rate: rate,
+                                                fullName: fName, email: mail, userName: uName, mobile: mob, cid: cid,
+                                                payments: rows, chart: chartData
+                                            });
+                                        })();
+                                    """.trimIndent()
+
+                                    view.evaluateJavascript(extractDashJs) { raw ->
+                                        try {
+                                            val unquoted = JSONTokener(raw).nextValue().toString()
+                                            val obj = JSONObject(unquoted)
+
+                                            val payList = mutableListOf<PaymentItem>()
+                                            val pArr = obj.optJSONArray("payments")
+                                            if (pArr != null) {
+                                                for (i in 0 until pArr.length()) {
+                                                    val item = pArr.getJSONObject(i)
+                                                    payList.add(
+                                                        PaymentItem(
+                                                            date = item.optString("date"),
+                                                            bill = item.optString("bill"),
+                                                            receive = item.optString("receive"),
+                                                            remarks = item.optString("remarks")
+                                                        )
+                                                    )
+                                                }
+                                            }
+
+                                            val usageList = mutableListOf<DailyUsage>()
+                                            val cArr = obj.optJSONArray("chart")
+                                            if (cArr != null) {
+                                                for (i in 0 until cArr.length()) {
+                                                    val cItem = cArr.getJSONObject(i)
+                                                    usageList.add(
+                                                        DailyUsage(
+                                                            label = cItem.optString("label"),
+                                                            download = cItem.optDouble("down", 0.0).toFloat(),
+                                                            upload = cItem.optDouble("up", 0.0).toFloat()
+                                                        )
+                                                    )
+                                                }
+                                            }
+
+                                            state = state.copy(
+                                                isLoggedIn = true,
+                                                isSyncing = false,
+                                                packageName = obj.optString("pkg").ifEmpty { state.packageName },
+                                                accountStatus = obj.optString("acc").ifEmpty { "Active" },
+                                                connectionStatus = obj.optString("conn").ifEmpty { "ONLINE" },
+                                                expiryDate = obj.optString("exp").ifEmpty { state.expiryDate },
+                                                planRate = obj.optString("rate").ifEmpty { state.planRate },
+                                                fullName = obj.optString("fullName").ifEmpty { state.fullName },
+                                                email = obj.optString("email").ifEmpty { state.email },
+                                                userName = obj.optString("userName").ifEmpty { u },
+                                                mobile = obj.optString("mobile").ifEmpty { state.mobile },
+                                                customerId = obj.optString("cid").ifEmpty { state.customerId },
+                                                payments = if (payList.isNotEmpty()) payList else state.payments,
+                                                dailyUsage = if (usageList.isNotEmpty()) usageList else state.dailyUsage
+                                            )
+                                            loginError = null
+                                            view.loadUrl("https://care.plus.net.bd/customer/report")
+                                        } catch (_: Exception) {
+                                            state = state.copy(isLoggedIn = true, isSyncing = false)
+                                        }
+                                    }
+                                }, 2200)
+                            } else if (url != null && url.contains("/report")) {
+                                view?.postDelayed({
+                                    val extractReportJs = """
+                                        (function() {
+                                            var text = document.body.innerText || "";
+                                            var speeds = text.match(/(\d+\.?\d*\s*(?:Mbps|Kbps|MB\/s|KB\/s|bps))/gi) || [];
+                                            var usages = text.match(/(\d+\.?\d*\s*(?:GB|MB|TB|KB))/gi) || [];
+                                            return JSON.stringify({
+                                                downSpd: speeds[0] || "0.0 Mbps",
+                                                upSpd: speeds[1] || "0.0 Mbps",
+                                                sessDown: usages[0] || "0 MB",
+                                                sessUp: usages[1] || "0 MB"
+                                            });
+                                        })();
+                                    """.trimIndent()
+
+                                    view.evaluateJavascript(extractReportJs) { raw ->
+                                        try {
+                                            val unquoted = JSONTokener(raw).nextValue().toString()
+                                            val obj = JSONObject(unquoted)
+                                            val dSpd = obj.optString("downSpd", "0.0 Mbps")
+                                            val uSpd = obj.optString("upSpd", "0.0 Mbps")
+                                            val num = Regex("(\\d+\\.?\\d*)").find(dSpd)?.groupValues?.get(1)?.toFloatOrNull() ?: 5f
+                                            val updatedHist = (state.liveSpeedHistory + num).takeLast(12)
+
+                                            state = state.copy(
+                                                isSyncing = false,
+                                                downSpeed = dSpd,
+                                                upSpeed = uSpd,
+                                                sessionDownload = obj.optString("sessDown", "0 MB"),
+                                                sessionUpload = obj.optString("sessUp", "0 MB"),
+                                                liveSpeedHistory = updatedHist
+                                            )
+                                        } catch (_: Exception) {
+                                            state = state.copy(isSyncing = false)
+                                        }
+                                    }
+                                }, 2200)
+                            }
+                        }
+                    }
+
+                    hiddenWebView = this
+                    if (savedUser.isNotEmpty() && savedPass.isNotEmpty()) {
+                        loadUrl("https://care.plus.net.bd/customer/dashboard")
+                    }
+                }
+            }
+        )
+
         if (!state.isLoggedIn) {
             LoginScreen(
                 initialUser = savedUser,
@@ -351,6 +391,8 @@ fun PlusnetNativeApp() {
                 onLogin = { u, p ->
                     savedUser = u
                     savedPass = p
+                    loginAttemptCount = 0
+                    loginError = null
                     prefs.edit().putString("user", u).putString("pass", p).apply()
                     state = state.copy(isSyncing = true)
                     hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/login")
@@ -574,7 +616,6 @@ fun DashboardTab(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Package & Connection Hero Card
         item {
             Box(
                 modifier = Modifier
@@ -613,7 +654,6 @@ fun DashboardTab(
             }
         }
 
-        // Expiry & Speed Cards
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatCard("Expiry Date", data.expiryDate, Icons.Default.EventAvailable, accentPurple, glassCard, glassBorder, Modifier.weight(1f))
@@ -621,7 +661,6 @@ fun DashboardTab(
             }
         }
 
-        // Monthly Usage Bar Chart (Download vs Upload from Dashboard)
         item {
             Column(
                 modifier = Modifier
@@ -669,7 +708,6 @@ fun DashboardTab(
             }
         }
 
-        // Payment History
         item {
             Text("Payment History", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
         }
@@ -812,7 +850,6 @@ fun ProfileTab(
         ProfileInfoRow("User Name", data.userName, Icons.Default.Badge, accentBlue, glassCard, glassBorder)
         ProfileInfoRow("Mobile Number", data.mobile.ifEmpty { "--" }, Icons.Default.PhoneAndroid, greenOnline, glassCard, glassBorder)
 
-        // Customer ID with Copy Button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
