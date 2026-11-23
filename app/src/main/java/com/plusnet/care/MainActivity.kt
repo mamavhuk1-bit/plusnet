@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Bundle
+import android.view.ViewGroup
 import android.webkit.*
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -35,8 +37,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -49,7 +49,7 @@ data class DailyUsage(val label: String, val download: Float, val upload: Float)
 
 data class PlusnetState(
     val isLoggedIn: Boolean = false,
-    val isSyncing: Boolean = false,
+    val isSyncing: Boolean = true,
     val fullName: String = "Customer",
     val email: String = "",
     val userName: String = "",
@@ -66,7 +66,7 @@ data class PlusnetState(
     val upSpeed: String = "0.0 Mbps",
     val sessionDownload: String = "0 MB",
     val sessionUpload: String = "0 MB",
-    val liveSpeedHistory: List<Float> = listOf(5f, 12f, 8f, 20f, 15f, 25f)
+    val liveSpeedHistory: List<Float> = listOf(8f, 15f, 12f, 24f, 18f, 28f)
 )
 
 class MainActivity : ComponentActivity() {
@@ -81,41 +81,16 @@ class MainActivity : ComponentActivity() {
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun PlusnetNativeApp() {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("plusnet_native_v4", Context.MODE_PRIVATE) }
-
-    var savedUser by remember { mutableStateOf(prefs.getString("user", "") ?: "") }
-    var savedPass by remember { mutableStateOf(prefs.getString("pass", "") ?: "") }
-    var state by remember {
-        mutableStateOf(
-            PlusnetState(
-                isLoggedIn = false,
-                isSyncing = savedUser.isNotEmpty() && savedPass.isNotEmpty()
-            )
-        )
-    }
+    var state by remember { mutableStateOf(PlusnetState()) }
     var selectedTab by remember { mutableIntStateOf(0) }
-    var loginError by remember { mutableStateOf<String?>(null) }
-    var hiddenWebView by remember { mutableStateOf<WebView?>(null) }
-    var loginAttemptCount by remember { mutableIntStateOf(0) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
-    // Safety timeout so loading spinner never gets stuck
-    LaunchedEffect(state.isSyncing) {
-        if (state.isSyncing) {
-            delay(16000)
-            if (state.isSyncing && !state.isLoggedIn) {
-                state = state.copy(isSyncing = false)
-                loginError = "Login timeout. Check credentials or internet and try again."
-            }
-        }
-    }
-
-    // Auto refresh live data every 12 seconds when logged in
+    // Background auto-sync every 12 seconds once logged in
     LaunchedEffect(state.isLoggedIn) {
         while (state.isLoggedIn) {
             delay(12000)
             val target = if (selectedTab == 0) "dashboard" else "report"
-            hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/$target")
+            webViewRef?.loadUrl("https://care.plus.net.bd/customer/$target")
         }
     }
 
@@ -128,80 +103,189 @@ fun PlusnetNativeApp() {
     val orangeUpload = Color(0xFFF97316)
 
     Box(modifier = Modifier.fillMaxSize().background(bgDark)) {
-        // Active 1dp Background WebView (never suspended by Android OS)
+        // 1. Native UI Layer (Shown immediately once logged in)
+        if (state.isLoggedIn) {
+            Scaffold(
+                containerColor = bgDark,
+                topBar = {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(glassCard)
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Wifi, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("PLUSNET CARE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Text(
+                                    text = if (state.isSyncing) "Syncing background data..." else "Connected • ${state.userName.ifEmpty { "Online" }}",
+                                    color = if (state.isSyncing) Color(0xFFFBBF24) else greenOnline,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                        Row {
+                            IconButton(onClick = {
+                                state = state.copy(isSyncing = true)
+                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/dashboard")
+                            }) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Sync", tint = Color.White)
+                            }
+                            IconButton(onClick = {
+                                CookieManager.getInstance().removeAllCookies(null)
+                                CookieManager.getInstance().flush()
+                                state = PlusnetState(isLoggedIn = false, isSyncing = true)
+                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/login")
+                            }) {
+                                Icon(Icons.Default.Logout, contentDescription = "Logout", tint = Color(0xFFF87171))
+                            }
+                        }
+                    }
+                },
+                bottomBar = {
+                    NavigationBar(containerColor = glassCard, contentColor = Color.White) {
+                        NavigationBarItem(
+                            selected = selectedTab == 0,
+                            onClick = { selectedTab = 0 },
+                            icon = { Icon(Icons.Default.Dashboard, contentDescription = null) },
+                            label = { Text("Dashboard") },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
+                                indicatorColor = accentBlue.copy(alpha = 0.15f),
+                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 1,
+                            onClick = {
+                                selectedTab = 1
+                                state = state.copy(isSyncing = true)
+                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/report")
+                            },
+                            icon = { Icon(Icons.Default.Speed, contentDescription = null) },
+                            label = { Text("Live Speed & Session") },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
+                                indicatorColor = accentBlue.copy(alpha = 0.15f),
+                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 2,
+                            onClick = { selectedTab = 2 },
+                            icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
+                            label = { Text("Profile") },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
+                                indicatorColor = accentBlue.copy(alpha = 0.15f),
+                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
+                            )
+                        )
+                    }
+                }
+            ) { padding ->
+                Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    if (state.isSyncing) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = accentBlue, trackColor = glassCard)
+                    }
+                    when (selectedTab) {
+                        0 -> DashboardTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline, orangeUpload)
+                        1 -> ReportTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
+                        2 -> ProfileTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
+                    }
+                }
+            }
+        } else {
+            // Clean Header during initial login
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(glassCard)
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.LockOpen, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("PLUSNET SELF-CARE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("Sign in once • Native UI will launch automatically", color = accentBlue, fontSize = 11.sp)
+                    }
+                }
+                if (state.isSyncing) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = accentBlue, trackColor = glassCard)
+                }
+            }
+        }
+
+        // 2. WebView Layer: Visible ONLY during login, then shrinks to 1dp background engine!
         AndroidView(
-            modifier = Modifier.size(1.dp).alpha(0.01f),
+            modifier = if (!state.isLoggedIn) {
+                Modifier
+                    .fillMaxSize()
+                    .padding(top = 72.dp)
+            } else {
+                Modifier
+                    .size(1.dp)
+                    .alpha(0.01f)
+            },
             factory = { ctx ->
                 WebView(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    setBackgroundColor(android.graphics.Color.parseColor("#0A0E17"))
                     val cm = CookieManager.getInstance()
                     cm.setAcceptCookie(true)
                     cm.setAcceptThirdPartyCookies(this, true)
+
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         databaseEnabled = true
+                        loadWithOverviewMode = true
+                        useWideViewPort = true
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                     }
 
                     webViewClient = object : WebViewClient() {
-                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                            if (request?.isForMainFrame == true) {
-                                state = state.copy(isSyncing = false)
-                                loginError = "Network error: ${error?.description ?: "Unable to connect"}"
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            state = state.copy(isSyncing = true)
+                            if (url != null && url.contains("/dashboard")) {
+                                state = state.copy(isLoggedIn = true)
                             }
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             CookieManager.getInstance().flush()
-                            val u = prefs.getString("user", "") ?: ""
-                            val p = prefs.getString("pass", "") ?: ""
 
                             if (url != null && url.contains("/login")) {
-                                if (u.isNotEmpty() && p.isNotEmpty()) {
-                                    if (loginAttemptCount >= 2) {
-                                        state = state.copy(isSyncing = false)
-                                        loginError = "Invalid User Name or Password"
-                                        return
-                                    }
-                                    loginAttemptCount++
-                                    view?.postDelayed({
-                                        val jsLogin = """
-                                            (function() {
-                                                function setNativeValue(el, value) {
-                                                    var lastValue = el.value;
-                                                    el.value = value;
-                                                    var event = new Event('input', { bubbles: true });
-                                                    var tracker = el._valueTracker;
-                                                    if (tracker) { tracker.setValue(lastValue); }
-                                                    el.dispatchEvent(event);
-                                                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                                                }
-                                                var inputs = Array.from(document.querySelectorAll('input'));
-                                                var pInput = inputs.find(i => i.type === 'password');
-                                                var uInput = inputs.find(i => i.type === 'text' || i.type === 'email' || (!i.type && i !== pInput));
-                                                if (uInput && pInput) {
-                                                    uInput.focus();
-                                                    setNativeValue(uInput, ${JSONObject.quote(u)});
-                                                    pInput.focus();
-                                                    setNativeValue(pInput, ${JSONObject.quote(p)});
-                                                    setTimeout(function() {
-                                                        var btn = document.querySelector('button[type="submit"], input[type="submit"], button');
-                                                        if (btn) {
-                                                            btn.click();
-                                                        } else if (pInput.form) {
-                                                            pInput.form.submit();
-                                                        }
-                                                    }, 500);
-                                                }
-                                            })();
-                                        """.trimIndent()
-                                        view.evaluateJavascript(jsLogin, null)
-                                    }, 1200)
-                                }
+                                state = state.copy(isLoggedIn = false, isSyncing = false)
                             } else if (url != null && url.contains("/dashboard")) {
-                                loginAttemptCount = 0
+                                state = state.copy(isLoggedIn = true)
                                 view?.postDelayed({
                                     val extractDashJs = """
                                         (function() {
@@ -319,19 +403,19 @@ fun PlusnetNativeApp() {
                                                 planRate = obj.optString("rate").ifEmpty { state.planRate },
                                                 fullName = obj.optString("fullName").ifEmpty { state.fullName },
                                                 email = obj.optString("email").ifEmpty { state.email },
-                                                userName = obj.optString("userName").ifEmpty { u },
+                                                userName = obj.optString("userName").ifEmpty { state.userName },
                                                 mobile = obj.optString("mobile").ifEmpty { state.mobile },
                                                 customerId = obj.optString("cid").ifEmpty { state.customerId },
                                                 payments = if (payList.isNotEmpty()) payList else state.payments,
                                                 dailyUsage = if (usageList.isNotEmpty()) usageList else state.dailyUsage
                                             )
-                                            loginError = null
+                                            // Fetch live speed & session report in background
                                             view.loadUrl("https://care.plus.net.bd/customer/report")
                                         } catch (_: Exception) {
-                                            state = state.copy(isLoggedIn = true, isSyncing = false)
+                                            state = state.copy(isSyncing = false)
                                         }
                                     }
-                                }, 2200)
+                                }, 2000)
                             } else if (url != null && url.contains("/report")) {
                                 view?.postDelayed({
                                     val extractReportJs = """
@@ -354,7 +438,7 @@ fun PlusnetNativeApp() {
                                             val obj = JSONObject(unquoted)
                                             val dSpd = obj.optString("downSpd", "0.0 Mbps")
                                             val uSpd = obj.optString("upSpd", "0.0 Mbps")
-                                            val num = Regex("(\\d+\\.?\\d*)").find(dSpd)?.groupValues?.get(1)?.toFloatOrNull() ?: 5f
+                                            val num = Regex("(\\d+\\.?\\d*)").find(dSpd)?.groupValues?.get(1)?.toFloatOrNull() ?: 8f
                                             val updatedHist = (state.liveSpeedHistory + num).takeLast(12)
 
                                             state = state.copy(
@@ -369,233 +453,16 @@ fun PlusnetNativeApp() {
                                             state = state.copy(isSyncing = false)
                                         }
                                     }
-                                }, 2200)
+                                }, 2000)
                             }
                         }
                     }
 
-                    hiddenWebView = this
-                    if (savedUser.isNotEmpty() && savedPass.isNotEmpty()) {
-                        loadUrl("https://care.plus.net.bd/customer/dashboard")
-                    }
+                    webViewRef = this
+                    loadUrl("https://care.plus.net.bd/customer/dashboard")
                 }
             }
         )
-
-        if (!state.isLoggedIn) {
-            LoginScreen(
-                initialUser = savedUser,
-                initialPass = savedPass,
-                isLoading = state.isSyncing,
-                errorMsg = loginError,
-                onLogin = { u, p ->
-                    savedUser = u
-                    savedPass = p
-                    loginAttemptCount = 0
-                    loginError = null
-                    prefs.edit().putString("user", u).putString("pass", p).apply()
-                    state = state.copy(isSyncing = true)
-                    hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/login")
-                }
-            )
-        } else {
-            Scaffold(
-                containerColor = bgDark,
-                topBar = {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(glassCard)
-                            .padding(horizontal = 18.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .clip(RoundedCornerShape(11.dp))
-                                    .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(Icons.Default.Wifi, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
-                                Text("PLUSNET CARE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                Text(
-                                    text = if (state.isSyncing) "Syncing live data..." else "Connected • ${state.userName}",
-                                    color = if (state.isSyncing) Color(0xFFFBBF24) else greenOnline,
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                        Row {
-                            IconButton(onClick = {
-                                state = state.copy(isSyncing = true)
-                                hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/dashboard")
-                            }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Sync", tint = Color.White)
-                            }
-                            IconButton(onClick = {
-                                prefs.edit().clear().apply()
-                                CookieManager.getInstance().removeAllCookies(null)
-                                state = PlusnetState(isLoggedIn = false)
-                            }) {
-                                Icon(Icons.Default.Logout, contentDescription = "Logout", tint = Color(0xFFF87171))
-                            }
-                        }
-                    }
-                },
-                bottomBar = {
-                    NavigationBar(containerColor = glassCard, contentColor = Color.White) {
-                        NavigationBarItem(
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 },
-                            icon = { Icon(Icons.Default.Dashboard, contentDescription = null) },
-                            label = { Text("Dashboard") },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
-                                indicatorColor = accentBlue.copy(alpha = 0.15f),
-                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
-                            )
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 1,
-                            onClick = {
-                                selectedTab = 1
-                                state = state.copy(isSyncing = true)
-                                hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/report")
-                            },
-                            icon = { Icon(Icons.Default.Speed, contentDescription = null) },
-                            label = { Text("Live Speed & Session") },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
-                                indicatorColor = accentBlue.copy(alpha = 0.15f),
-                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
-                            )
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 2,
-                            onClick = { selectedTab = 2 },
-                            icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
-                            label = { Text("Profile") },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
-                                indicatorColor = accentBlue.copy(alpha = 0.15f),
-                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
-                            )
-                        )
-                    }
-                }
-            ) { padding ->
-                Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    if (state.isSyncing) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = accentBlue, trackColor = glassCard)
-                    }
-                    when (selectedTab) {
-                        0 -> DashboardTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline, orangeUpload)
-                        1 -> ReportTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
-                        2 -> ProfileTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun LoginScreen(
-    initialUser: String,
-    initialPass: String,
-    isLoading: Boolean,
-    errorMsg: String?,
-    onLogin: (String, String) -> Unit
-) {
-    var user by remember { mutableStateOf(initialUser) }
-    var pass by remember { mutableStateOf(initialPass) }
-    var showPass by remember { mutableStateOf(false) }
-
-    val glassCard = Color(0xFF141B2D)
-    val accentBlue = Color(0xFF38BDF8)
-    val accentPurple = Color(0xFF818CF8)
-
-    Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(glassCard)
-                .border(1.dp, Color(0xFF24304A), RoundedCornerShape(24.dp))
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(68.dp)
-                    .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Router, contentDescription = null, tint = Color.White, modifier = Modifier.size(34.dp))
-            }
-            Spacer(modifier = Modifier.height(14.dp))
-            Text("PLUSNET", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("Native Self-Care Client", color = Color.Gray, fontSize = 13.sp)
-            Spacer(modifier = Modifier.height(22.dp))
-
-            OutlinedTextField(
-                value = user,
-                onValueChange = { user = it },
-                label = { Text("User Name (e.g. PPG092)") },
-                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedBorderColor = accentBlue, unfocusedBorderColor = Color(0xFF24304A)
-                )
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            OutlinedTextField(
-                value = pass,
-                onValueChange = { pass = it },
-                label = { Text("Password") },
-                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
-                trailingIcon = {
-                    IconButton(onClick = { showPass = !showPass }) {
-                        Icon(if (showPass) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = null)
-                    }
-                },
-                visualTransformation = if (showPass) VisualTransformation.None else PasswordVisualTransformation(),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedBorderColor = accentBlue, unfocusedBorderColor = Color(0xFF24304A)
-                )
-            )
-
-            if (errorMsg != null) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(errorMsg, color = Color(0xFFF87171), fontSize = 13.sp)
-            }
-
-            Spacer(modifier = Modifier.height(22.dp))
-            Button(
-                onClick = { if (user.isNotBlank() && pass.isNotBlank()) onLogin(user.trim(), pass.trim()) },
-                enabled = !isLoading,
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = accentBlue)
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("Sign In", color = Color(0xFF0A0E17), fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                }
-            }
-        }
     }
 }
 
@@ -681,7 +548,7 @@ fun DashboardTab(
                 }
                 Spacer(modifier = Modifier.height(14.dp))
                 if (data.dailyUsage.isEmpty()) {
-                    Text("Loading monthly chart bars...", color = Color.Gray, fontSize = 12.sp)
+                    Text("Syncing monthly usage bars...", color = Color.Gray, fontSize = 12.sp)
                 } else {
                     val bars = data.dailyUsage.takeLast(14)
                     val maxVal = bars.maxOfOrNull { maxOf(it.download, it.upload) }?.coerceAtLeast(1f) ?: 100f
@@ -847,7 +714,7 @@ fun ProfileTab(
             }
         }
 
-        ProfileInfoRow("User Name", data.userName, Icons.Default.Badge, accentBlue, glassCard, glassBorder)
+        ProfileInfoRow("User Name", data.userName.ifEmpty { "--" }, Icons.Default.Badge, accentBlue, glassCard, glassBorder)
         ProfileInfoRow("Mobile Number", data.mobile.ifEmpty { "--" }, Icons.Default.PhoneAndroid, greenOnline, glassCard, glassBorder)
 
         Row(
