@@ -7,6 +7,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.os.Bundle
+import android.text.Html
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.Toast
@@ -40,6 +41,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -78,8 +80,12 @@ val AppThemes = listOf(
 data class PaymentItem(val date: String, val bill: String, val receive: String, val remarks: String)
 data class DailyUsage(val label: String, val download: Float, val upload: Float)
 data class SessionLogItem(val connDate: String, val discDate: String, val upload: String, val download: String, val duration: String)
-data class TicketItem(val id: String, val status: String, val title: String, val description: String, val date: String, val assigned: String)
+data class TicketItem(val id: String, val status: String, val title: String, val description: String, val date: String, val assigned: String, val detailUrl: String = "")
 data class TicketCategory(val value: String, val label: String)
+
+fun cleanHtml(raw: String): String {
+    return Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString().trim()
+}
 
 data class PlusnetState(
     val isLoggedIn: Boolean = false,
@@ -94,21 +100,18 @@ data class PlusnetState(
     val connectionStatus: String = "ONLINE",
     val expiryDate: String = "--",
     val planRate: String = "--",
-    val payments: List<PaymentItem> = emptyList(),
+    val dashPayments: List<PaymentItem> = emptyList(),
+    val fullPaymentHistory: List<PaymentItem> = emptyList(),
+    val chartMonthTitle: String = "Usage of Current Month",
     val dailyUsage: List<DailyUsage> = emptyList(),
     val monthlyDownGB: Float = 0f,
     val monthlyUpGB: Float = 0f,
-    val downSpeed: String = "0.0 Mbps",
-    val upSpeed: String = "0.0 Mbps",
+    val downSpeed: String = "0.0 kbps",
+    val upSpeed: String = "0.0 mbps",
     val liveSpeedHistory: List<Float> = listOf(2f, 5f, 4f, 8f, 6f, 10f),
     val sessionLogs: List<SessionLogItem> = emptyList(),
     val tickets: List<TicketItem> = emptyList(),
-    val ticketCategories: List<TicketCategory> = listOf(
-        TicketCategory("Link Down", "Link Down"),
-        TicketCategory("Slow Speed", "Slow Speed"),
-        TicketCategory("Billing Issue", "Billing Issue"),
-        TicketCategory("Router Configuration", "Router Configuration")
-    )
+    val ticketCategories: List<TicketCategory> = emptyList()
 )
 
 class MainActivity : ComponentActivity() {
@@ -124,7 +127,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PlusnetNativeApp() {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("plusnet_prefs_v5", Context.MODE_PRIVATE) }
+    val prefs = remember { context.getSharedPreferences("plusnet_prefs_v6", Context.MODE_PRIVATE) }
     var themeIndex by remember { mutableIntStateOf(prefs.getInt("theme_idx", 0).coerceIn(0, AppThemes.lastIndex)) }
     val theme = AppThemes[themeIndex]
 
@@ -133,17 +136,22 @@ fun PlusnetNativeApp() {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var showThemeDialog by remember { mutableStateOf(false) }
     var showNewTicketDialog by remember { mutableStateOf(false) }
+    var selectedTicketDetail by remember { mutableStateOf<TicketItem?>(null) }
+    var ticketConversation by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(state.isLoggedIn) {
         while (state.isLoggedIn) {
-            delay(14000)
-            val target = when (selectedTab) {
-                0 -> "dashboard"
-                1 -> "report"
-                2 -> "complainlist"
-                else -> "dashboard"
+            delay(15000)
+            if (!showNewTicketDialog && selectedTicketDetail == null) {
+                val target = when (selectedTab) {
+                    0 -> "dashboard"
+                    1 -> "report"
+                    2 -> "customerhistory"
+                    3 -> "complainlist"
+                    else -> "dashboard"
+                }
+                webViewRef?.loadUrl("https://care.plus.net.bd/customer/$target")
             }
-            webViewRef?.loadUrl("https://care.plus.net.bd/customer/$target")
         }
     }
 
@@ -181,7 +189,8 @@ fun PlusnetNativeApp() {
                                 state = state.copy(isSyncing = true)
                                 val p = when (selectedTab) {
                                     1 -> "report"
-                                    2 -> "complainlist"
+                                    2 -> "customerhistory"
+                                    3 -> "complainlist"
                                     else -> "dashboard"
                                 }
                                 webViewRef?.loadUrl("https://care.plus.net.bd/customer/$p")
@@ -209,7 +218,7 @@ fun PlusnetNativeApp() {
                             selected = selectedTab == 0,
                             onClick = { selectedTab = 0 },
                             icon = { Icon(Icons.Default.Dashboard, contentDescription = null) },
-                            label = { Text("Dashboard", fontSize = 11.sp) },
+                            label = { Text("Home", fontSize = 10.sp) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = theme.accent, selectedTextColor = theme.accent,
                                 indicatorColor = theme.accent.copy(alpha = 0.16f),
@@ -224,7 +233,7 @@ fun PlusnetNativeApp() {
                                 webViewRef?.loadUrl("https://care.plus.net.bd/customer/report")
                             },
                             icon = { Icon(Icons.Default.Speed, contentDescription = null) },
-                            label = { Text("Speed & Session", fontSize = 11.sp) },
+                            label = { Text("Speed", fontSize = 10.sp) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = theme.accent, selectedTextColor = theme.accent,
                                 indicatorColor = theme.accent.copy(alpha = 0.16f),
@@ -236,10 +245,10 @@ fun PlusnetNativeApp() {
                             onClick = {
                                 selectedTab = 2
                                 state = state.copy(isSyncing = true)
-                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/complainlist")
+                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/customerhistory")
                             },
-                            icon = { Icon(Icons.Default.ConfirmationNumber, contentDescription = null) },
-                            label = { Text("Complain", fontSize = 11.sp) },
+                            icon = { Icon(Icons.Default.ReceiptLong, contentDescription = null) },
+                            label = { Text("Payments", fontSize = 10.sp) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = theme.accent, selectedTextColor = theme.accent,
                                 indicatorColor = theme.accent.copy(alpha = 0.16f),
@@ -248,9 +257,24 @@ fun PlusnetNativeApp() {
                         )
                         NavigationBarItem(
                             selected = selectedTab == 3,
-                            onClick = { selectedTab = 3 },
+                            onClick = {
+                                selectedTab = 3
+                                state = state.copy(isSyncing = true)
+                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/complainlist")
+                            },
+                            icon = { Icon(Icons.Default.ConfirmationNumber, contentDescription = null) },
+                            label = { Text("Complain", fontSize = 10.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = theme.accent, selectedTextColor = theme.accent,
+                                indicatorColor = theme.accent.copy(alpha = 0.16f),
+                                unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 4,
+                            onClick = { selectedTab = 4 },
                             icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
-                            label = { Text("Profile", fontSize = 11.sp) },
+                            label = { Text("Profile", fontSize = 10.sp) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = theme.accent, selectedTextColor = theme.accent,
                                 indicatorColor = theme.accent.copy(alpha = 0.16f),
@@ -267,8 +291,92 @@ fun PlusnetNativeApp() {
                     when (selectedTab) {
                         0 -> DashboardTab(state, theme)
                         1 -> ReportTab(state, theme)
-                        2 -> ComplainTab(state, theme, onOpenNewTicket = { showNewTicketDialog = true })
-                        3 -> ProfileTab(state, theme)
+                        2 -> PaymentHistoryTab(state, theme)
+                        3 -> ComplainTab(
+                            data = state,
+                            theme = theme,
+                            onOpenNewTicket = {
+                                showNewTicketDialog = true
+                                // Open modal in background WebView to scrape all dynamic select options
+                                val openModalJs = """
+                                    (function() {
+                                        var btn = Array.from(document.querySelectorAll('button, a')).find(el => el.innerText.includes('Create a New Ticket') || el.innerText.includes('New Ticket'));
+                                        if (btn) btn.click();
+                                        setTimeout(function() {
+                                            var cats = [];
+                                            document.querySelectorAll('select option').forEach(function(opt) {
+                                                var v = opt.value;
+                                                var t = opt.innerText.trim();
+                                                if (v && t && !t.toLowerCase().includes('select') && isNaN(t)) {
+                                                    cats.push({ val: v, label: t });
+                                                }
+                                            });
+                                            return JSON.stringify(cats);
+                                        }, 900);
+                                    })();
+                                """.trimIndent()
+                                webViewRef?.evaluateJavascript(openModalJs, null)
+                                webViewRef?.postDelayed({
+                                    val readCatsJs = """
+                                        (function() {
+                                            var cats = [];
+                                            document.querySelectorAll('select option').forEach(function(opt) {
+                                                var v = opt.value;
+                                                var t = opt.innerText.trim();
+                                                if (v && t && !t.toLowerCase().includes('select') && isNaN(t)) {
+                                                    cats.push({ val: v, label: t });
+                                                }
+                                            });
+                                            return JSON.stringify(cats);
+                                        })();
+                                    """.trimIndent()
+                                    webViewRef?.evaluateJavascript(readCatsJs) { raw ->
+                                        try {
+                                            val arr = org.json.JSONArray(JSONTokener(raw).nextValue().toString())
+                                            val list = mutableListOf<TicketCategory>()
+                                            for (i in 0 until arr.length()) {
+                                                val o = arr.getJSONObject(i)
+                                                list.add(TicketCategory(o.optString("val"), cleanHtml(o.optString("label"))))
+                                            }
+                                            if (list.isNotEmpty()) {
+                                                state = state.copy(ticketCategories = list)
+                                            }
+                                        } catch (_: Exception) {}
+                                    }
+                                }, 1200)
+                            },
+                            onTicketClick = { ticket ->
+                                selectedTicketDetail = ticket
+                                ticketConversation = null
+                                // Click row in WebView to fetch full ticket replies/details if available
+                                val clickRowJs = """
+                                    (function() {
+                                        var rows = Array.from(document.querySelectorAll('table tr'));
+                                        var target = rows.find(r => r.innerText.includes(${JSONObject.quote(ticket.id)}));
+                                        if (target) {
+                                            var link = target.querySelector('a, button') || target;
+                                            link.click();
+                                        }
+                                    })();
+                                """.trimIndent()
+                                webViewRef?.evaluateJavascript(clickRowJs, null)
+                                webViewRef?.postDelayed({
+                                    val readDetailJs = """
+                                        (function() {
+                                            var modal = document.querySelector('.modal.show, [role="dialog"], .card-body');
+                                            return modal ? modal.innerText : "";
+                                        })();
+                                    """.trimIndent()
+                                    webViewRef?.evaluateJavascript(readDetailJs) { raw ->
+                                        try {
+                                            val txt = JSONTokener(raw).nextValue().toString().trim()
+                                            if (txt.isNotEmpty()) ticketConversation = txt
+                                        } catch (_: Exception) {}
+                                    }
+                                }, 1000)
+                            }
+                        )
+                        4 -> ProfileTab(state, theme)
                     }
                 }
             }
@@ -365,6 +473,10 @@ fun PlusnetNativeApp() {
                                                 }
                                             }
 
+                                            var monthMatch = text.match(/Usage of\s+[A-Za-z]+/i);
+                                            var yearMatch = text.match(/\b(202\d)\b/);
+                                            var chartTitle = (monthMatch ? monthMatch[0] : "Usage of Month") + (yearMatch ? (" " + yearMatch[1]) : "");
+
                                             var rows = [];
                                             document.querySelectorAll("table tr").forEach(function(tr, index) {
                                                 if (index === 0) return;
@@ -392,8 +504,9 @@ fun PlusnetNativeApp() {
                                                             var uVal = (s1[k] ? (s1[k].y || 0) : 0);
                                                             totalD += dVal;
                                                             totalU += uVal;
+                                                            var rawCat = cats[k] || s0[k].category || s0[k].name || ("" + (k+1));
                                                             chartData.push({
-                                                                label: cats[k] || (s0[k].name || ("" + (k+1))),
+                                                                label: String(rawCat),
                                                                 down: dVal,
                                                                 up: uVal
                                                             });
@@ -404,7 +517,7 @@ fun PlusnetNativeApp() {
                                             return JSON.stringify({
                                                 pkg: pkg, acc: acc, conn: conn, exp: exp, rate: rate,
                                                 fullName: fName, email: mail, userName: uName, mobile: mob, cid: cid,
-                                                payments: rows, chart: chartData, totalD: totalD, totalU: totalU
+                                                chartTitle: chartTitle, payments: rows, chart: chartData, totalD: totalD, totalU: totalU
                                             });
                                         })();
                                     """.trimIndent()
@@ -416,7 +529,7 @@ fun PlusnetNativeApp() {
                                             obj.optJSONArray("payments")?.let { arr ->
                                                 for (i in 0 until arr.length()) {
                                                     val it = arr.getJSONObject(i)
-                                                    payList.add(PaymentItem(it.optString("date"), it.optString("bill"), it.optString("receive"), it.optString("remarks")))
+                                                    payList.add(PaymentItem(it.optString("date"), it.optString("bill"), it.optString("receive"), cleanHtml(it.optString("remarks"))))
                                                 }
                                             }
                                             val usageList = mutableListOf<DailyUsage>()
@@ -439,7 +552,8 @@ fun PlusnetNativeApp() {
                                                 userName = obj.optString("userName").ifEmpty { state.userName },
                                                 mobile = obj.optString("mobile").ifEmpty { state.mobile },
                                                 customerId = obj.optString("cid").ifEmpty { state.customerId },
-                                                payments = if (payList.isNotEmpty()) payList else state.payments,
+                                                chartMonthTitle = obj.optString("chartTitle").ifEmpty { state.chartMonthTitle },
+                                                dashPayments = if (payList.isNotEmpty()) payList else state.dashPayments,
                                                 dailyUsage = if (usageList.isNotEmpty()) usageList else state.dailyUsage,
                                                 monthlyDownGB = obj.optDouble("totalD", state.monthlyDownGB.toDouble()).toFloat(),
                                                 monthlyUpGB = obj.optDouble("totalU", state.monthlyUpGB.toDouble()).toFloat()
@@ -515,6 +629,46 @@ fun PlusnetNativeApp() {
                                                 liveSpeedHistory = updatedHist,
                                                 sessionLogs = if (sessList.isNotEmpty()) sessList else state.sessionLogs
                                             )
+                                            if (state.fullPaymentHistory.isEmpty()) {
+                                                view.loadUrl("https://care.plus.net.bd/customer/customerhistory")
+                                            }
+                                        } catch (_: Exception) {
+                                            state = state.copy(isSyncing = false)
+                                        }
+                                    }
+                                }, 2000)
+                            } else if (url != null && url.contains("/customerhistory")) {
+                                view?.postDelayed({
+                                    val histJs = """
+                                        (function() {
+                                            var rows = [];
+                                            document.querySelectorAll("table tr").forEach(function(tr, index) {
+                                                if (index === 0) return;
+                                                var tds = tr.querySelectorAll("td");
+                                                if (tds.length >= 4) {
+                                                    rows.push({
+                                                        date: tds[0].innerText.trim(),
+                                                        bill: tds[1].innerText.trim(),
+                                                        receive: tds[2].innerText.trim(),
+                                                        remarks: tds[3].innerText.trim()
+                                                    });
+                                                }
+                                            });
+                                            return JSON.stringify(rows);
+                                        })();
+                                    """.trimIndent()
+                                    view.evaluateJavascript(histJs) { raw ->
+                                        try {
+                                            val arr = org.json.JSONArray(JSONTokener(raw).nextValue().toString())
+                                            val list = mutableListOf<PaymentItem>()
+                                            for (i in 0 until arr.length()) {
+                                                val it = arr.getJSONObject(i)
+                                                list.add(PaymentItem(it.optString("date"), it.optString("bill"), it.optString("receive"), cleanHtml(it.optString("remarks"))))
+                                            }
+                                            state = state.copy(
+                                                isSyncing = false,
+                                                fullPaymentHistory = if (list.isNotEmpty()) list else state.fullPaymentHistory
+                                            )
                                             if (state.tickets.isEmpty()) {
                                                 view.loadUrl("https://care.plus.net.bd/customer/complainlist")
                                             }
@@ -532,13 +686,15 @@ fun PlusnetNativeApp() {
                                                 if (idx === 0) return;
                                                 var tds = tr.querySelectorAll("td");
                                                 if (tds.length >= 5) {
+                                                    var aTag = tr.querySelector("a");
                                                     tickets.push({
                                                         id: tds[0].innerText.trim(),
                                                         status: tds[1].innerText.trim(),
                                                         title: tds[2].innerText.trim(),
                                                         desc: tds[3].innerText.trim(),
                                                         date: tds[4].innerText.trim(),
-                                                        assigned: tds.length > 5 ? tds[5].innerText.trim() : ""
+                                                        assigned: tds.length > 5 ? tds[5].innerText.trim() : "",
+                                                        href: aTag ? aTag.href : ""
                                                     });
                                                 }
                                             });
@@ -566,10 +722,11 @@ fun PlusnetNativeApp() {
                                                         TicketItem(
                                                             id = it.optString("id"),
                                                             status = it.optString("status"),
-                                                            title = it.optString("title"),
-                                                            description = it.optString("desc"),
+                                                            title = cleanHtml(it.optString("title")),
+                                                            description = cleanHtml(it.optString("desc")),
                                                             date = it.optString("date"),
-                                                            assigned = it.optString("assigned")
+                                                            assigned = it.optString("assigned"),
+                                                            detailUrl = it.optString("href")
                                                         )
                                                     )
                                                 }
@@ -578,7 +735,7 @@ fun PlusnetNativeApp() {
                                             obj.optJSONArray("cats")?.let { arr ->
                                                 for (i in 0 until arr.length()) {
                                                     val it = arr.getJSONObject(i)
-                                                    cList.add(TicketCategory(it.optString("val"), it.optString("label")))
+                                                    cList.add(TicketCategory(it.optString("val"), cleanHtml(it.optString("label"))))
                                                 }
                                             }
                                             state = state.copy(
@@ -601,7 +758,7 @@ fun PlusnetNativeApp() {
             }
         )
 
-        // Theme Picker Dialog (Default + 10 Windows Themes)
+        // Theme Picker Dialog
         if (showThemeDialog) {
             AlertDialog(
                 onDismissRequest = { showThemeDialog = false },
@@ -646,6 +803,57 @@ fun PlusnetNativeApp() {
             )
         }
 
+        // Ticket Detail Dialog (View Completed/Active Ticket Details)
+        selectedTicketDetail?.let { ticket ->
+            val isCompleted = ticket.status.contains("COMPLET", ignoreCase = true)
+            val badgeColor = if (isCompleted) Color(0xFF10B981) else Color(0xFFF59E0B)
+            AlertDialog(
+                onDismissRequest = { selectedTicketDetail = null },
+                containerColor = theme.card,
+                title = {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("Ticket #${ticket.id}", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                        Surface(color = badgeColor.copy(alpha = 0.2f), shape = RoundedCornerShape(8.dp)) {
+                            Text(ticket.status, color = badgeColor, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                        }
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Category / Title:", color = theme.textSecondary, fontSize = 12.sp)
+                        Text(ticket.title, color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+
+                        Text("Description & Remarks:", color = theme.textSecondary, fontSize = 12.sp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(theme.bg)
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = ticketConversation ?: ticket.description,
+                                color = theme.textPrimary,
+                                fontSize = 13.sp
+                            )
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Date: ${ticket.date}", color = theme.textSecondary, fontSize = 12.sp)
+                            if (ticket.assigned.isNotEmpty()) {
+                                Text("Assigned: ${ticket.assigned}", color = theme.accent, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedTicketDetail = null }) {
+                        Text("Close", color = theme.accent, fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+
         // Create New Complain Ticket Dialog
         if (showNewTicketDialog) {
             CreateTicketDialog(
@@ -657,28 +865,24 @@ fun PlusnetNativeApp() {
                     state = state.copy(isSyncing = true)
                     val submitJs = """
                         (function() {
-                            var createBtn = Array.from(document.querySelectorAll('button, a')).find(el => el.innerText.includes('Create a New Ticket') || el.innerText.includes('New Ticket'));
-                            if (createBtn) createBtn.click();
+                            var sel = document.querySelector('select');
+                            if (sel) {
+                                sel.value = ${JSONObject.quote(catVal)};
+                                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                            var ta = document.querySelector('textarea, input[name*="desc"], input[name*="note"]');
+                            if (ta) {
+                                ta.value = ${JSONObject.quote(descText)};
+                                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
                             setTimeout(function() {
-                                var sel = document.querySelector('select');
-                                if (sel) {
-                                    sel.value = ${JSONObject.quote(catVal)};
-                                    sel.dispatchEvent(new Event('change', { bubbles: true }));
-                                }
-                                var ta = document.querySelector('textarea, input[name*="desc"], input[name*="note"]');
-                                if (ta) {
-                                    ta.value = ${JSONObject.quote(descText)};
-                                    ta.dispatchEvent(new Event('input', { bubbles: true }));
-                                }
-                                setTimeout(function() {
-                                    var subBtn = Array.from(document.querySelectorAll('button[type="submit"], button')).find(b => b.innerText.toLowerCase().includes('submit') || b.innerText.toLowerCase().includes('save') || b.innerText.toLowerCase().includes('create'));
-                                    if (subBtn) subBtn.click();
-                                }, 500);
-                            }, 800);
+                                var subBtn = Array.from(document.querySelectorAll('button[type="submit"], button')).find(b => b.innerText.toLowerCase().includes('submit') || b.innerText.toLowerCase().includes('save') || b.innerText.toLowerCase().includes('create'));
+                                if (subBtn) subBtn.click();
+                            }, 500);
                         })();
                     """.trimIndent()
                     webViewRef?.evaluateJavascript(submitJs) {
-                        Toast.makeText(context, "Submitting ticket...", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Submitting complain ticket...", Toast.LENGTH_SHORT).show()
                         webViewRef?.postDelayed({
                             webViewRef?.loadUrl("https://care.plus.net.bd/customer/complainlist")
                         }, 2500)
@@ -702,25 +906,10 @@ fun PlusnetGreenLogo(size: androidx.compose.ui.unit.Dp) {
             val w = this.size.width
             val h = this.size.height
             val stroke = w * 0.22f
-            drawCircle(
-                color = Color.White,
-                radius = (w - stroke) / 2f,
-                style = Stroke(width = stroke)
-            )
-            drawRect(
-                color = Color(0xFF047835),
-                topLeft = Offset(0f, h * 0.52f),
-                size = Size(w * 0.45f, h * 0.48f)
-            )
-            drawRect(
-                color = Color.White,
-                topLeft = Offset(0f, h * 0.50f),
-                size = Size(stroke, h * 0.50f)
-            )
-            drawCircle(
-                color = Color.White,
-                radius = w * 0.14f
-            )
+            drawCircle(color = Color.White, radius = (w - stroke) / 2f, style = Stroke(width = stroke))
+            drawRect(color = Color(0xFF047835), topLeft = Offset(0f, h * 0.52f), size = Size(w * 0.45f, h * 0.48f))
+            drawRect(color = Color.White, topLeft = Offset(0f, h * 0.50f), size = Size(stroke, h * 0.50f))
+            drawCircle(color = Color.White, radius = w * 0.14f)
         }
     }
 }
@@ -735,7 +924,6 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Hero Banner
         item {
             Box(
                 modifier = Modifier
@@ -764,7 +952,6 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
             }
         }
 
-        // Expiry & Live Speed
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatCard("Expiry Date", data.expiryDate, Icons.Default.EventAvailable, theme.secondary, theme, Modifier.weight(1f))
@@ -772,7 +959,6 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
             }
         }
 
-        // This Month's Total Usage Card
         item {
             Column(
                 modifier = Modifier
@@ -800,7 +986,7 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
             }
         }
 
-        // Daily Bar Chart
+        // Daily Bar Chart WITH Month Title on Top & Date Labels on Bottom
         item {
             Column(
                 modifier = Modifier
@@ -811,7 +997,10 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
                     .padding(16.dp)
             ) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Daily Usage Chart (GB)", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Column {
+                        Text(data.chartMonthTitle, color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text("Daily Data in GB", color = theme.textSecondary, fontSize = 11.sp)
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF38BDF8)))
                         Text(" Down  ", color = theme.textSecondary, fontSize = 11.sp)
@@ -823,44 +1012,112 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
                 if (data.dailyUsage.isEmpty()) {
                     Text("Syncing monthly usage bars...", color = theme.textSecondary, fontSize = 12.sp)
                 } else {
-                    val bars = data.dailyUsage.takeLast(14)
+                    val bars = data.dailyUsage.takeLast(12)
                     val maxVal = bars.maxOfOrNull { maxOf(it.download, it.upload) }?.coerceAtLeast(1f) ?: 100f
-                    Canvas(modifier = Modifier.fillMaxWidth().height(150.dp)) {
-                        val groupWidth = size.width / bars.size
+                    Canvas(modifier = Modifier.fillMaxWidth().height(185.dp)) {
+                        val leftPad = 60f
+                        val bottomPad = 36f
+                        val chartW = size.width - leftPad
+                        val chartH = size.height - bottomPad
+                        val groupWidth = chartW / bars.size
                         val barW = (groupWidth * 0.34f).coerceAtLeast(6f)
+
+                        val axisPaint = Paint().apply {
+                            color = android.graphics.Color.GRAY
+                            textSize = 24f
+                            isAntiAlias = true
+                        }
+                        val datePaint = Paint().apply {
+                            color = android.graphics.Color.LTGRAY
+                            textSize = 20f
+                            isAntiAlias = true
+                            textAlign = Paint.Align.CENTER
+                        }
+
+                        // Y-Axis GB Scale
+                        drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.0fG", maxVal), 0f, 24f, axisPaint)
+                        drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.0fG", maxVal / 2f), 0f, chartH / 2f + 8f, axisPaint)
+                        drawContext.canvas.nativeCanvas.drawText("0", 18f, chartH, axisPaint)
+
                         bars.forEachIndexed { i, item ->
-                            val xStart = i * groupWidth + (groupWidth * 0.12f)
-                            val dHeight = (item.download / maxVal) * size.height * 0.9f
-                            val uHeight = (item.upload / maxVal) * size.height * 0.9f
-                            drawRect(Color(0xFF38BDF8), Offset(xStart, size.height - dHeight), Size(barW, dHeight))
-                            drawRect(Color(0xFFF97316), Offset(xStart + barW + 3f, size.height - uHeight), Size(barW, uHeight))
+                            val xStart = leftPad + (i * groupWidth) + (groupWidth * 0.1f)
+                            val dHeight = (item.download / maxVal) * (chartH - 16f)
+                            val uHeight = (item.upload / maxVal) * (chartH - 16f)
+                            drawRect(Color(0xFF38BDF8), Offset(xStart, chartH - dHeight), Size(barW, dHeight))
+                            drawRect(Color(0xFFF97316), Offset(xStart + barW + 2f, chartH - uHeight), Size(barW, uHeight))
+
+                            // Short Date Label under each bar (e.g. 07/11)
+                            val shortDate = if (item.label.length >= 5) item.label.take(5) else item.label
+                            drawContext.canvas.nativeCanvas.drawText(
+                                shortDate,
+                                xStart + barW,
+                                size.height - 6f,
+                                datePaint
+                            )
                         }
                     }
                 }
             }
         }
+    }
+}
 
-        // Payment History
+@Composable
+fun PaymentHistoryTab(data: PlusnetState, theme: AppThemeConfig) {
+    val list = data.fullPaymentHistory.ifEmpty { data.dashPayments }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         item {
-            Text("Payment History", color = theme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
-        }
-        items(data.payments) { pay ->
-            val amountDisplay = if (pay.receive != "0" && pay.receive.isNotEmpty()) "+৳ ${pay.receive}" else "৳ ${pay.bill}"
-            val amountColor = if (pay.receive != "0" && pay.receive.isNotEmpty()) Color(0xFF10B981) else Color(0xFFF59E0B)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(theme.card)
-                    .border(1.dp, theme.border, RoundedCornerShape(16.dp))
-                    .padding(14.dp)
-            ) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(pay.date, color = theme.textSecondary, fontSize = 12.sp)
-                    Text(amountDisplay, color = amountColor, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("Payment & Billing History", color = theme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("Fetched from /customer/customerhistory", color = theme.textSecondary, fontSize = 12.sp)
                 }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(pay.remarks, color = theme.textPrimary, fontSize = 12.sp)
+                Surface(color = theme.accent.copy(alpha = 0.2f), shape = RoundedCornerShape(10.dp)) {
+                    Text("${list.size} Records", color = theme.accent, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                }
+            }
+        }
+
+        if (list.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(theme.card).padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Loading payment history records...", color = theme.textSecondary, fontSize = 13.sp)
+                }
+            }
+        } else {
+            items(list) { pay ->
+                val isCredit = pay.receive != "0" && pay.receive.isNotEmpty()
+                val amountDisplay = if (isCredit) "+৳ ${pay.receive}" else "৳ ${pay.bill}"
+                val amountColor = if (isCredit) Color(0xFF10B981) else Color(0xFFF59E0B)
+                val badgeText = if (isCredit) "RECEIVED" else "BILLED"
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(theme.card)
+                        .border(1.dp, theme.border, RoundedCornerShape(16.dp))
+                        .padding(14.dp)
+                ) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(color = amountColor.copy(alpha = 0.16f), shape = RoundedCornerShape(6.dp)) {
+                                Text(badgeText, color = amountColor, fontWeight = FontWeight.Bold, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(pay.date, color = theme.textSecondary, fontSize = 12.sp)
+                        }
+                        Text(amountDisplay, color = amountColor, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(pay.remarks, color = theme.textPrimary, fontSize = 13.sp)
+                }
             }
         }
     }
@@ -879,7 +1136,6 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
             }
         }
 
-        // Live Speed Graph WITH Numeric Labels
         item {
             Column(
                 modifier = Modifier
@@ -890,7 +1146,7 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                     .padding(18.dp)
             ) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Live Speed Graph (with Numbers)", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text("Live Speed Graph", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     Text("● LIVE", color = Color(0xFF10B981), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -915,7 +1171,6 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                             textAlign = Paint.Align.CENTER
                         }
 
-                        // Y-Axis Numeric Markers (Max, Mid, 0)
                         drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.0fM", maxV), 0f, 26f, labelPaint)
                         drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.0fM", maxV / 2f), 0f, chartH / 2f + 10f, labelPaint)
                         drawContext.canvas.nativeCanvas.drawText("0", 15f, chartH, labelPaint)
@@ -926,12 +1181,7 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                             val y = chartH - ((v / maxV) * (chartH - 25f))
                             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                             drawCircle(color = theme.accent, radius = 6f, center = Offset(x, y))
-                            drawContext.canvas.nativeCanvas.drawText(
-                                String.format(Locale.US, "%.1f", v),
-                                x,
-                                y - 14f,
-                                pointPaint
-                            )
+                            drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.1f", v), x, y - 14f, pointPaint)
                         }
                         drawPath(path = path, color = theme.accent, style = Stroke(width = 5f, cap = StrokeCap.Round))
                     }
@@ -939,7 +1189,6 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
             }
         }
 
-        // Previous Sessions History Header
         item {
             Text("Session Log (Previous & Current Sessions)", color = theme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
         }
@@ -983,7 +1232,12 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
 }
 
 @Composable
-fun ComplainTab(data: PlusnetState, theme: AppThemeConfig, onOpenNewTicket: () -> Unit) {
+fun ComplainTab(
+    data: PlusnetState,
+    theme: AppThemeConfig,
+    onOpenNewTicket: () -> Unit,
+    onTicketClick: (TicketItem) -> Unit
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -1002,7 +1256,7 @@ fun ComplainTab(data: PlusnetState, theme: AppThemeConfig, onOpenNewTicket: () -
         }
 
         item {
-            Text("Complain & Ticket History", color = theme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("Complain & Ticket History (Tap any ticket to view)", color = theme.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         }
 
         if (data.tickets.isEmpty()) {
@@ -1024,22 +1278,29 @@ fun ComplainTab(data: PlusnetState, theme: AppThemeConfig, onOpenNewTicket: () -
                         .clip(RoundedCornerShape(16.dp))
                         .background(theme.card)
                         .border(1.dp, theme.border, RoundedCornerShape(16.dp))
+                        .clickable { onTicketClick(ticket) }
                         .padding(14.dp)
                 ) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("#${ticket.id} • ${ticket.title}", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(
+                            text = "#${ticket.id} • ${ticket.title}",
+                            color = theme.textPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).padding(end = 8.dp)
+                        )
                         Surface(color = badgeColor.copy(alpha = 0.2f), shape = RoundedCornerShape(8.dp)) {
                             Text(ticket.status, color = badgeColor, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
                         }
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(ticket.description, color = theme.textSecondary, fontSize = 13.sp)
+                    Text(ticket.description, color = theme.textSecondary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(ticket.date, color = theme.textSecondary, fontSize = 11.sp)
-                        if (ticket.assigned.isNotEmpty()) {
-                            Text("Assigned: ${ticket.assigned}", color = theme.accent, fontSize = 11.sp)
-                        }
+                        Text("Tap to view details →", color = theme.accent, fontSize = 11.sp, fontWeight = FontWeight.Medium)
                     }
                 }
             }
@@ -1055,7 +1316,16 @@ fun CreateTicketDialog(
     onDismiss: () -> Unit,
     onSubmit: (String, String) -> Unit
 ) {
-    var selectedCat by remember { mutableStateOf(categories.firstOrNull() ?: TicketCategory("Link Down", "Link Down")) }
+    val effectiveCategories = categories.ifEmpty {
+        listOf(
+            TicketCategory("NO INTERNET", "NO INTERNET"),
+            TicketCategory("Slow Speed", "Slow Speed"),
+            TicketCategory("বিলিং", "বিলিং (Billing)"),
+            TicketCategory("TJ box position change/Room change", "TJ box position change/Room change"),
+            TicketCategory("Router Configuration", "Router Configuration")
+        )
+    }
+    var selectedCat by remember(effectiveCategories) { mutableStateOf(effectiveCategories.first()) }
     var expanded by remember { mutableStateOf(false) }
     var description by remember { mutableStateOf("") }
 
@@ -1065,7 +1335,7 @@ fun CreateTicketDialog(
         title = { Text("Create New Complain", color = theme.textPrimary, fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Select Category (Fetched from Plusnet)", color = theme.textSecondary, fontSize = 12.sp)
+                Text("Select Category (${effectiveCategories.size} options loaded)", color = theme.textSecondary, fontSize = 12.sp)
                 ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
                     OutlinedTextField(
                         value = selectedCat.label,
@@ -1080,7 +1350,7 @@ fun CreateTicketDialog(
                         )
                     )
                     ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        categories.forEach { cat ->
+                        effectiveCategories.forEach { cat ->
                             DropdownMenuItem(
                                 text = { Text(cat.label) },
                                 onClick = {
