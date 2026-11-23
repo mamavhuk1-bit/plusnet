@@ -1,10 +1,14 @@
 package com.plusnet.care
 
+import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
+import android.webkit.*
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -33,195 +38,36 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.*
-import org.jsoup.Jsoup
-import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 
-data class PaymentItem(val date: String, val amount: String, val remarks: String)
-data class DashboardData(
-    val packageName: String = "Loading...",
+data class PaymentItem(val date: String, val bill: String, val receive: String, val remarks: String)
+data class DailyUsage(val label: String, val download: Float, val upload: Float)
+
+data class PlusnetState(
+    val isLoggedIn: Boolean = false,
+    val isSyncing: Boolean = false,
+    val statusText: String = "Connecting...",
+    val fullName: String = "Customer",
+    val email: String = "",
+    val userName: String = "",
+    val mobile: String = "",
+    val customerId: String = "",
+    val packageName: String = "Basic+PIP",
     val accountStatus: String = "Active",
     val connectionStatus: String = "ONLINE",
     val expiryDate: String = "--",
     val planRate: String = "--",
     val payments: List<PaymentItem> = emptyList(),
+    val monthlyChartTitle: String = "Monthly Usage",
+    val dailyUsage: List<DailyUsage> = emptyList(),
     val downSpeed: String = "0.0 Mbps",
     val upSpeed: String = "0.0 Mbps",
     val sessionDownload: String = "0 MB",
     val sessionUpload: String = "0 MB",
-    val speedHistory: List<Float> = listOf(10f, 25f, 18f, 45f, 38f, 62f, 55f, 80f)
+    val liveSpeedHistory: List<Float> = listOf(5f, 12f, 8f, 20f, 15f, 25f)
 )
-
-class PlusnetRepository(context: Context) {
-    private val prefs = context.getSharedPreferences("plusnet_prefs", Context.MODE_PRIVATE)
-    private val cookieStore = HashMap<String, List<Cookie>>()
-
-    private val client = OkHttpClient.Builder()
-        .cookieJar(object : CookieJar {
-            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                cookieStore[url.host] = cookies
-            }
-            override fun loadForRequest(url: HttpUrl): List<Cookie> {
-                return cookieStore[url.host] ?: emptyList()
-            }
-        })
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
-
-    fun saveCredentials(user: String, pass: String) {
-        prefs.edit().putString("user", user).putString("pass", pass).apply()
-    }
-
-    fun getSavedUser(): String = prefs.getString("user", "") ?: ""
-    fun getSavedPass(): String = prefs.getString("pass", "") ?: ""
-    fun clearCredentials() = prefs.edit().clear().apply()
-
-    suspend fun loginAndFetch(username: String, password: String): Result<DashboardData> = withContext(Dispatchers.IO) {
-        try {
-            val loginUrl = "https://care.plus.net.bd/customer/login"
-            val getReq = Request.Builder().url(loginUrl)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36")
-                .build()
-            val loginHtml = client.newCall(getReq).execute().body?.string() ?: ""
-            val loginDoc = Jsoup.parse(loginHtml)
-
-            val formBuilder = FormBody.Builder()
-            loginDoc.select("input[type=hidden]").forEach { input ->
-                val name = input.attr("name")
-                val value = input.attr("value")
-                if (name.isNotEmpty()) formBuilder.add(name, value)
-            }
-
-            val userField = loginDoc.select("input[type=text], input[type=email]").firstOrNull()?.attr("name") ?: "username"
-            val passField = loginDoc.select("input[type=password]").firstOrNull()?.attr("name") ?: "password"
-
-            formBuilder.add(userField, username)
-            formBuilder.add(passField, password)
-
-            val postReq = Request.Builder()
-                .url(loginUrl)
-                .post(formBuilder.build())
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36")
-                .header("Referer", loginUrl)
-                .build()
-
-            val postResp = client.newCall(postReq).execute()
-            val finalUrl = postResp.request.url.toString()
-            val dashHtml = postResp.body?.string() ?: ""
-
-            if (finalUrl.contains("/login") && dashHtml.contains("password", ignoreCase = true)) {
-                return@withContext Result.failure(Exception("Invalid Username or Password"))
-            }
-
-            val data = parseAllPages(dashHtml)
-            Result.success(data)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    suspend fun refreshData(currentHistory: List<Float>): Result<DashboardData> = withContext(Dispatchers.IO) {
-        try {
-            val dashReq = Request.Builder().url("https://care.plus.net.bd/customer/dashboard")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36")
-                .build()
-            val dashResp = client.newCall(dashReq).execute()
-            if (dashResp.request.url.toString().contains("/login")) {
-                val u = getSavedUser()
-                val p = getSavedPass()
-                if (u.isNotEmpty() && p.isNotEmpty()) return@withContext loginAndFetch(u, p)
-                return@withContext Result.failure(Exception("Session expired"))
-            }
-            val dashHtml = dashResp.body?.string() ?: ""
-            val data = parseAllPages(dashHtml, currentHistory)
-            Result.success(data)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    private fun parseAllPages(dashHtml: String, oldHistory: List<Float> = emptyList()): DashboardData {
-        val doc = Jsoup.parse(dashHtml)
-        val bodyText = doc.text()
-
-        val pkg = Regex("PACKAGE\\s+([A-Za-z0-9+_-]+)").find(bodyText)?.groupValues?.get(1)
-            ?: doc.select(".badge, .label").firstOrNull()?.text() ?: "Basic+PIP"
-
-        val accStatus = if (bodyText.contains("Active", ignoreCase = true)) "Active" else "Inactive"
-        val connStatus = if (bodyText.contains("ONLINE", ignoreCase = true)) "ONLINE" else "OFFLINE"
-
-        val expiry = Regex("Expiry Date\\s+([A-Za-z]+\\s+\\d{1,2},\\s+\\d{4})").find(bodyText)?.groupValues?.get(1)
-            ?: Regex("([A-Z][a-z]{2}\\s+\\d{1,2},\\s+\\d{4})").find(bodyText)?.groupValues?.get(1) ?: "Dec 16, 2026"
-
-        val rate = Regex("Plan rate\\s+([৳0-9.,]+)").find(bodyText)?.groupValues?.get(1)
-            ?: Regex("(৳\\s*\\d+[.,]?\\d*)").find(bodyText)?.groupValues?.get(1) ?: "৳ 1200.0"
-
-        val paymentList = mutableListOf<PaymentItem>()
-        doc.select("table tr").drop(1).take(6).forEach { row ->
-            val cols = row.select("td")
-            if (cols.size >= 4) {
-                paymentList.add(
-                    PaymentItem(
-                        date = cols[0].text().trim(),
-                        amount = if (cols[2].text().trim() != "0") "৳ ${cols[2].text().trim()}" else "৳ ${cols[1].text().trim()}",
-                        remarks = cols[3].text().trim()
-                    )
-                )
-            }
-        }
-
-        // Fetch Report Page in Background
-        var downSpd = "0.0 Mbps"
-        var upSpd = "0.0 Mbps"
-        var sessDown = "0 GB"
-        var sessUp = "0 GB"
-        var speedNum = 12f
-
-        try {
-            val repReq = Request.Builder().url("https://care.plus.net.bd/customer/report")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36")
-                .build()
-            val repHtml = client.newCall(repReq).execute().body?.string() ?: ""
-            val repDoc = Jsoup.parse(repHtml)
-            val repText = repDoc.text()
-
-            val speeds = Regex("(\\d+\\.?\\d*\\s*(?:Mbps|Kbps|MB/s|KB/s))", RegexOption.IGNORE_CASE)
-                .findAll(repText).map { it.groupValues[1] }.toList()
-            if (speeds.isNotEmpty()) {
-                downSpd = speeds[0]
-                speedNum = Regex("(\\d+\\.?\\d*)").find(downSpd)?.groupValues?.get(1)?.toFloatOrNull() ?: 15f
-            }
-            if (speeds.size > 1) upSpd = speeds[1]
-
-            val usages = Regex("(\\d+\\.?\\d*\\s*(?:GB|MB|TB))", RegexOption.IGNORE_CASE)
-                .findAll(repText).map { it.groupValues[1] }.toList()
-            if (usages.isNotEmpty()) sessDown = usages[0]
-            if (usages.size > 1) sessUp = usages[1]
-        } catch (_: Exception) {}
-
-        val newHistory = (oldHistory + speedNum).takeLast(12).ifEmpty { listOf(12f, 28f, 19f, 42f, 35f, speedNum) }
-
-        return DashboardData(
-            packageName = pkg,
-            accountStatus = accStatus,
-            connectionStatus = connStatus,
-            expiryDate = expiry,
-            planRate = rate,
-            payments = paymentList,
-            downSpeed = downSpd,
-            upSpeed = upSpd,
-            sessionDownload = sessDown,
-            sessionUpload = sessUp,
-            speedHistory = newHistory
-        )
-    }
-}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -232,71 +78,282 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun PlusnetNativeApp() {
     val context = LocalContext.current
-    val repo = remember { PlusnetRepository(context) }
-    val scope = rememberCoroutineScope()
+    val prefs = remember { context.getSharedPreferences("plusnet_native_v3", Context.MODE_PRIVATE) }
 
-    var isLoggedIn by remember { mutableStateOf(false) }
-    var isLoading by remember { mutableStateOf(false) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
-    var dashData by remember { mutableStateOf(DashboardData()) }
+    var savedUser by remember { mutableStateOf(prefs.getString("user", "") ?: "") }
+    var savedPass by remember { mutableStateOf(prefs.getString("pass", "") ?: "") }
+    var state by remember {
+        mutableStateOf(
+            PlusnetState(
+                isLoggedIn = savedUser.isNotEmpty() && savedPass.isNotEmpty(),
+                isSyncing = savedUser.isNotEmpty()
+            )
+        )
+    }
     var selectedTab by remember { mutableIntStateOf(0) }
+    var loginError by remember { mutableStateOf<String?>(null) }
+    var hiddenWebView by remember { mutableStateOf<WebView?>(null) }
+    var fetchTarget by remember { mutableStateOf("dashboard") }
 
-    // Auto login if saved
-    LaunchedEffect(Unit) {
-        val u = repo.getSavedUser()
-        val p = repo.getSavedPass()
-        if (u.isNotEmpty() && p.isNotEmpty()) {
-            isLoading = true
-            repo.loginAndFetch(u, p).onSuccess {
-                dashData = it
-                isLoggedIn = true
-            }.onFailure {
-                errorMsg = it.message
+    // Background Headless Engine to execute JS, Highcharts, and Live AJAX
+    AndroidView(
+        modifier = Modifier.size(0.dp),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                val cm = CookieManager.getInstance()
+                cm.setAcceptCookie(true)
+                cm.setAcceptThirdPartyCookies(this, true)
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+                }
+
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        CookieManager.getInstance().flush()
+                        val u = prefs.getString("user", "") ?: ""
+                        val p = prefs.getString("pass", "") ?: ""
+
+                        if (url != null && url.contains("/login")) {
+                            if (u.isNotEmpty() && p.isNotEmpty()) {
+                                val jsLogin = """
+                                    (function() {
+                                        var uInput = document.querySelector('input[type="text"], input[type="email"], input[name*="user"], input[name*="email"]');
+                                        var pInput = document.querySelector('input[type="password"]');
+                                        var btn = document.querySelector('button[type="submit"], input[type="submit"], button');
+                                        if (uInput && pInput) {
+                                            uInput.value = ${JSONObject.quote(u)};
+                                            uInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                            pInput.value = ${JSONObject.quote(p)};
+                                            pInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                            setTimeout(function() { if (btn) btn.click(); }, 400);
+                                        }
+                                    })();
+                                """.trimIndent()
+                                view?.evaluateJavascript(jsLogin, null)
+                            }
+                        } else if (url != null && url.contains("/dashboard")) {
+                            // Wait 2.2s for JS/AJAX/Highcharts to render then extract all DOM data
+                            view?.postDelayed({
+                                val extractDashJs = """
+                                    (function() {
+                                        var text = document.body.innerText || "";
+                                        function findAfter(label) {
+                                            var idx = text.indexOf(label);
+                                            if (idx === -1) return "";
+                                            var sub = text.substring(idx + label.length).trim();
+                                            return sub.split('\n')[0].trim();
+                                        }
+                                        var pkg = findAfter("PACKAGE") || "Basic+PIP";
+                                        var acc = findAfter("Account Status") || (text.includes("Active") ? "Active" : "Inactive");
+                                        var conn = findAfter("Connection Status") || (text.includes("ONLINE") ? "ONLINE" : "OFFLINE");
+                                        var exp = findAfter("Expiry Date") || "--";
+                                        var rate = findAfter("Plan rate") || "--";
+
+                                        var uName = findAfter("User Name:");
+                                        var mob = findAfter("Mobile:");
+                                        var cid = findAfter("ID:");
+
+                                        var lines = text.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                                        var fName = "";
+                                        var mail = "";
+                                        for (var i = 0; i < lines.length; i++) {
+                                            if (lines[i].includes("@") && lines[i].includes(".")) {
+                                                mail = lines[i];
+                                                if (i > 0) fName = lines[i-1];
+                                                break;
+                                            }
+                                        }
+
+                                        var rows = [];
+                                        document.querySelectorAll("table tr").forEach(function(tr, index) {
+                                            if (index === 0) return;
+                                            var tds = tr.querySelectorAll("td");
+                                            if (tds.length >= 4) {
+                                                rows.push({
+                                                    date: tds[0].innerText.trim(),
+                                                    bill: tds[1].innerText.trim(),
+                                                    receive: tds[2].innerText.trim(),
+                                                    remarks: tds[3].innerText.trim()
+                                                });
+                                            }
+                                        });
+
+                                        var chartData = [];
+                                        if (window.Highcharts && Highcharts.charts) {
+                                            Highcharts.charts.forEach(function(c) {
+                                                if (c && c.series && c.series.length >= 1) {
+                                                    var cats = (c.xAxis && c.xAxis[0] && c.xAxis[0].categories) ? c.xAxis[0].categories : [];
+                                                    var s0 = c.series[0].data || [];
+                                                    var s1 = (c.series.length > 1) ? c.series[1].data : [];
+                                                    for (var k = 0; k < s0.length; k++) {
+                                                        chartData.push({
+                                                            label: cats[k] || (s0[k].name || ("" + (k+1))),
+                                                            down: s0[k].y || 0,
+                                                            up: (s1[k] ? (s1[k].y || 0) : 0)
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        return JSON.stringify({
+                                            pkg: pkg, acc: acc, conn: conn, exp: exp, rate: rate,
+                                            fullName: fName, email: mail, userName: uName, mobile: mob, cid: cid,
+                                            payments: rows, chart: chartData
+                                        });
+                                    })();
+                                """.trimIndent()
+
+                                view.evaluateJavascript(extractDashJs) { raw ->
+                                    try {
+                                        val clean = JSONObject.wrap(raw)?.toString() ?: raw
+                                        val unquoted = org.json.JSONTokener(raw).nextValue().toString()
+                                        val obj = JSONObject(unquoted)
+
+                                        val payList = mutableListOf<PaymentItem>()
+                                        val pArr = obj.optJSONArray("payments")
+                                        if (pArr != null) {
+                                            for (i in 0 until pArr.length()) {
+                                                val item = pArr.getJSONObject(i)
+                                                payList.add(
+                                                    PaymentItem(
+                                                        date = item.optString("date"),
+                                                        bill = item.optString("bill"),
+                                                        receive = item.optString("receive"),
+                                                        remarks = item.optString("remarks")
+                                                    )
+                                                )
+                                            }
+                                        }
+
+                                        val usageList = mutableListOf<DailyUsage>()
+                                        val cArr = obj.optJSONArray("chart")
+                                        if (cArr != null) {
+                                            for (i in 0 until cArr.length()) {
+                                                val cItem = cArr.getJSONObject(i)
+                                                usageList.add(
+                                                    DailyUsage(
+                                                        label = cItem.optString("label"),
+                                                        download = cItem.optDouble("down", 0.0).toFloat(),
+                                                        upload = cItem.optDouble("up", 0.0).toFloat()
+                                                    )
+                                                )
+                                            }
+                                        }
+
+                                        state = state.copy(
+                                            isLoggedIn = true,
+                                            isSyncing = false,
+                                            packageName = obj.optString("pkg").ifEmpty { state.packageName },
+                                            accountStatus = obj.optString("acc").ifEmpty { "Active" },
+                                            connectionStatus = obj.optString("conn").ifEmpty { "ONLINE" },
+                                            expiryDate = obj.optString("exp").ifEmpty { state.expiryDate },
+                                            planRate = obj.optString("rate").ifEmpty { state.planRate },
+                                            fullName = obj.optString("fullName").ifEmpty { state.fullName },
+                                            email = obj.optString("email").ifEmpty { state.email },
+                                            userName = obj.optString("userName").ifEmpty { u },
+                                            mobile = obj.optString("mobile").ifEmpty { state.mobile },
+                                            customerId = obj.optString("cid").ifEmpty { state.customerId },
+                                            payments = if (payList.isNotEmpty()) payList else state.payments,
+                                            dailyUsage = if (usageList.isNotEmpty()) usageList else state.dailyUsage
+                                        )
+                                        loginError = null
+                                        // Now fetch live report page in background
+                                        view.loadUrl("https://care.plus.net.bd/customer/report")
+                                    } catch (_: Exception) {
+                                        state = state.copy(isSyncing = false)
+                                    }
+                                }
+                            }, 2500)
+                        } else if (url != null && url.contains("/report")) {
+                            view?.postDelayed({
+                                val extractReportJs = """
+                                    (function() {
+                                        var text = document.body.innerText || "";
+                                        var speeds = text.match(/(\d+\.?\d*\s*(?:Mbps|Kbps|MB\/s|KB\/s|bps))/gi) || [];
+                                        var usages = text.match(/(\d+\.?\d*\s*(?:GB|MB|TB|KB))/gi) || [];
+                                        return JSON.stringify({
+                                            downSpd: speeds[0] || "0.0 Mbps",
+                                            upSpd: speeds[1] || "0.0 Mbps",
+                                            sessDown: usages[0] || "0 MB",
+                                            sessUp: usages[1] || "0 MB"
+                                        });
+                                    })();
+                                """.trimIndent()
+
+                                view.evaluateJavascript(extractReportJs) { raw ->
+                                    try {
+                                        val unquoted = org.json.JSONTokener(raw).nextValue().toString()
+                                        val obj = JSONObject(unquoted)
+                                        val dSpd = obj.optString("downSpd", "0.0 Mbps")
+                                        val uSpd = obj.optString("upSpd", "0.0 Mbps")
+                                        val num = Regex("(\\d+\\.?\\d*)").find(dSpd)?.groupValues?.get(1)?.toFloatOrNull() ?: 5f
+                                        val updatedHist = (state.liveSpeedHistory + num).takeLast(12)
+
+                                        state = state.copy(
+                                            isSyncing = false,
+                                            downSpeed = dSpd,
+                                            upSpeed = uSpd,
+                                            sessionDownload = obj.optString("sessDown", "0 MB"),
+                                            sessionUpload = obj.optString("sessUp", "0 MB"),
+                                            liveSpeedHistory = updatedHist
+                                        )
+                                    } catch (_: Exception) {
+                                        state = state.copy(isSyncing = false)
+                                    }
+                                }
+                            }, 2500)
+                        }
+                    }
+                }
+
+                hiddenWebView = this
+                if (savedUser.isNotEmpty() && savedPass.isNotEmpty()) {
+                    loadUrl("https://care.plus.net.bd/customer/dashboard")
+                }
             }
-            isLoading = false
+        }
+    )
+
+    // Auto refresh live data every 12 seconds when logged in
+    LaunchedEffect(state.isLoggedIn) {
+        while (state.isLoggedIn) {
+            delay(12000)
+            fetchTarget = if (selectedTab == 0) "dashboard" else "report"
+            hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/$fetchTarget")
         }
     }
 
-    // Background Auto Refresh every 8 seconds when logged in
-    LaunchedEffect(isLoggedIn) {
-        while (isLoggedIn) {
-            delay(8000)
-            repo.refreshData(dashData.speedHistory).onSuccess {
-                dashData = it
-            }
-        }
-    }
-
-    val bgDark = Color(0xFF0B0F19)
-    val glassCard = Color(0xFF151C2C)
-    val glassBorder = Color(0xFF263147)
+    val bgDark = Color(0xFF0A0E17)
+    val glassCard = Color(0xFF141B2D)
+    val glassBorder = Color(0xFF24304A)
     val accentBlue = Color(0xFF38BDF8)
     val accentPurple = Color(0xFF818CF8)
     val greenOnline = Color(0xFF10B981)
+    val orangeUpload = Color(0xFFF97316)
 
     Surface(modifier = Modifier.fillMaxSize(), color = bgDark) {
-        if (!isLoggedIn) {
+        if (!state.isLoggedIn) {
             LoginScreen(
-                initialUser = repo.getSavedUser(),
-                initialPass = repo.getSavedPass(),
-                isLoading = isLoading,
-                errorMsg = errorMsg,
+                initialUser = savedUser,
+                initialPass = savedPass,
+                isLoading = state.isSyncing,
+                errorMsg = loginError,
                 onLogin = { u, p ->
-                    scope.launch {
-                        isLoading = true
-                        errorMsg = null
-                        repo.loginAndFetch(u, p).onSuccess {
-                            repo.saveCredentials(u, p)
-                            dashData = it
-                            isLoggedIn = true
-                        }.onFailure {
-                            errorMsg = it.message ?: "Login Failed"
-                        }
-                        isLoading = false
-                    }
+                    savedUser = u
+                    savedPass = p
+                    prefs.edit().putString("user", u).putString("pass", p).apply()
+                    state = state.copy(isSyncing = true)
+                    hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/login")
                 }
             )
         } else {
@@ -307,39 +364,41 @@ fun PlusnetNativeApp() {
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(glassCard)
-                            .padding(horizontal = 20.dp, vertical = 16.dp),
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(11.dp))
                                     .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(Icons.Default.Wifi, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                Icon(Icons.Default.Wifi, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
                                 Text("PLUSNET CARE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                Text("Native Client • Auto Sync", color = accentBlue, fontSize = 11.sp)
+                                Text(
+                                    text = if (state.isSyncing) "Syncing live data..." else "Connected • ${state.userName}",
+                                    color = if (state.isSyncing) Color(0xFFFBBF24) else greenOnline,
+                                    fontSize = 11.sp
+                                )
                             }
                         }
                         Row {
                             IconButton(onClick = {
-                                scope.launch {
-                                    isLoading = true
-                                    repo.refreshData(dashData.speedHistory).onSuccess { dashData = it }
-                                    isLoading = false
-                                }
+                                state = state.copy(isSyncing = true)
+                                hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/dashboard")
                             }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Color.White)
+                                Icon(Icons.Default.Refresh, contentDescription = "Sync", tint = Color.White)
                             }
                             IconButton(onClick = {
-                                repo.clearCredentials()
-                                isLoggedIn = false
+                                prefs.edit().clear().apply()
+                                CookieManager.getInstance().removeAllCookies(null)
+                                state = PlusnetState(isLoggedIn = false)
                             }) {
                                 Icon(Icons.Default.Logout, contentDescription = "Logout", tint = Color(0xFFF87171))
                             }
@@ -361,9 +420,24 @@ fun PlusnetNativeApp() {
                         )
                         NavigationBarItem(
                             selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 },
+                            onClick = {
+                                selectedTab = 1
+                                state = state.copy(isSyncing = true)
+                                hiddenWebView?.loadUrl("https://care.plus.net.bd/customer/report")
+                            },
                             icon = { Icon(Icons.Default.Speed, contentDescription = null) },
-                            label = { Text("Live Speed & Report") },
+                            label = { Text("Live Speed & Session") },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = accentBlue, selectedTextColor = accentBlue,
+                                indicatorColor = accentBlue.copy(alpha = 0.15f),
+                                unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 2,
+                            onClick = { selectedTab = 2 },
+                            icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
+                            label = { Text("Profile") },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = accentBlue, selectedTextColor = accentBlue,
                                 indicatorColor = accentBlue.copy(alpha = 0.15f),
@@ -374,13 +448,13 @@ fun PlusnetNativeApp() {
                 }
             ) { padding ->
                 Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    if (isLoading) {
+                    if (state.isSyncing) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = accentBlue, trackColor = glassCard)
                     }
-                    if (selectedTab == 0) {
-                        DashboardTab(dashData, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
-                    } else {
-                        ReportTab(dashData, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
+                    when (selectedTab) {
+                        0 -> DashboardTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline, orangeUpload)
+                        1 -> ReportTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
+                        2 -> ProfileTab(state, glassCard, glassBorder, accentBlue, accentPurple, greenOnline)
                     }
                 }
             }
@@ -400,7 +474,7 @@ fun LoginScreen(
     var pass by remember { mutableStateOf(initialPass) }
     var showPass by remember { mutableStateOf(false) }
 
-    val glassCard = Color(0xFF151C2C)
+    val glassCard = Color(0xFF141B2D)
     val accentBlue = Color(0xFF38BDF8)
     val accentPurple = Color(0xFF818CF8)
 
@@ -410,34 +484,34 @@ fun LoginScreen(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(24.dp))
                 .background(glassCard)
-                .border(1.dp, Color(0xFF263147), RoundedCornerShape(24.dp))
+                .border(1.dp, Color(0xFF24304A), RoundedCornerShape(24.dp))
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Box(
                 modifier = Modifier
-                    .size(64.dp)
+                    .size(68.dp)
                     .clip(CircleShape)
                     .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Router, contentDescription = null, tint = Color.White, modifier = Modifier.size(32.dp))
+                Icon(Icons.Default.Router, contentDescription = null, tint = Color.White, modifier = Modifier.size(34.dp))
             }
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
             Text("PLUSNET", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("Customer Self-Care Portal", color = Color.Gray, fontSize = 13.sp)
-            Spacer(modifier = Modifier.height(24.dp))
+            Text("Native Self-Care Client", color = Color.Gray, fontSize = 13.sp)
+            Spacer(modifier = Modifier.height(22.dp))
 
             OutlinedTextField(
                 value = user,
                 onValueChange = { user = it },
-                label = { Text("Customer ID / Username") },
+                label = { Text("User Name (e.g. PPG092)") },
                 leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedBorderColor = accentBlue, unfocusedBorderColor = Color(0xFF263147)
+                    focusedBorderColor = accentBlue, unfocusedBorderColor = Color(0xFF24304A)
                 )
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -456,16 +530,16 @@ fun LoginScreen(
                 modifier = Modifier.fillMaxWidth(),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedBorderColor = accentBlue, unfocusedBorderColor = Color(0xFF263147)
+                    focusedBorderColor = accentBlue, unfocusedBorderColor = Color(0xFF24304A)
                 )
             )
 
             if (errorMsg != null) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(errorMsg, color = Color(0xFFF87171), fontSize = 13.sp)
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(22.dp))
             Button(
                 onClick = { if (user.isNotBlank() && pass.isNotBlank()) onLogin(user.trim(), pass.trim()) },
                 enabled = !isLoading,
@@ -476,7 +550,7 @@ fun LoginScreen(
                 if (isLoading) {
                     CircularProgressIndicator(color = Color.White, modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                 } else {
-                    Text("Sign In", color = Color(0xFF0B0F19), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Sign In", color = Color(0xFF0A0E17), fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
             }
         }
@@ -485,25 +559,29 @@ fun LoginScreen(
 
 @Composable
 fun DashboardTab(
-    data: DashboardData,
+    data: PlusnetState,
     glassCard: Color,
     glassBorder: Color,
     accentBlue: Color,
     accentPurple: Color,
-    greenOnline: Color
+    greenOnline: Color,
+    orangeUpload: Color
 ) {
+    val isOnline = data.connectionStatus.contains("ONLINE", ignoreCase = true)
+    val statusColor = if (isOnline) greenOnline else Color(0xFFF87171)
+
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Hero Package Banner
+        // Package & Connection Hero Card
         item {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(20.dp))
                     .background(Brush.horizontalGradient(listOf(Color(0xFF1E3A8A), Color(0xFF312E81))))
-                    .border(1.dp, accentBlue.copy(alpha = 0.4f), RoundedCornerShape(20.dp))
+                    .border(1.dp, accentBlue.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
                     .padding(20.dp)
             ) {
                 Row(
@@ -512,20 +590,17 @@ fun DashboardTab(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("CURRENT PACKAGE", color = accentBlue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Text("PACKAGE", color = accentBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(data.packageName, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(greenOnline))
+                            Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(statusColor))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("${data.connectionStatus} • ${data.accountStatus}", color = greenOnline, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            Text("${data.connectionStatus} • ${data.accountStatus}", color = statusColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
-                    Surface(
-                        color = Color.White.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
+                    Surface(color = Color.White.copy(alpha = 0.14f), shape = RoundedCornerShape(14.dp)) {
                         Text(
                             text = data.planRate,
                             color = Color.White,
@@ -538,34 +613,80 @@ fun DashboardTab(
             }
         }
 
-        // Info Grid
+        // Expiry & Speed Cards
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatCard("Expiry Date", data.expiryDate, Icons.Default.EventAvailable, accentPurple, glassCard, glassBorder, Modifier.weight(1f))
-                StatCard("Live Download", data.downSpeed, Icons.Default.ArrowDownward, accentBlue, glassCard, glassBorder, Modifier.weight(1f))
+                StatCard("Live Speed", "${data.downSpeed} ↓", Icons.Default.Speed, accentBlue, glassCard, glassBorder, Modifier.weight(1f))
             }
         }
 
-        // Payment History Header
+        // Monthly Usage Bar Chart (Download vs Upload from Dashboard)
         item {
-            Text("Recent Payment History", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(glassCard)
+                    .border(1.dp, glassBorder, RoundedCornerShape(20.dp))
+                    .padding(16.dp)
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Daily Data Usage (GB)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(accentBlue))
+                        Text(" Down  ", color = Color.Gray, fontSize = 11.sp)
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(orangeUpload))
+                        Text(" Up", color = Color.Gray, fontSize = 11.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+                if (data.dailyUsage.isEmpty()) {
+                    Text("Loading monthly chart bars...", color = Color.Gray, fontSize = 12.sp)
+                } else {
+                    val bars = data.dailyUsage.takeLast(14)
+                    val maxVal = bars.maxOfOrNull { maxOf(it.download, it.upload) }?.coerceAtLeast(1f) ?: 100f
+                    Canvas(modifier = Modifier.fillMaxWidth().height(150.dp)) {
+                        val groupWidth = size.width / bars.size
+                        val barW = (groupWidth * 0.34f).coerceAtLeast(6f)
+                        bars.forEachIndexed { i, item ->
+                            val xStart = i * groupWidth + (groupWidth * 0.12f)
+                            val dHeight = (item.download / maxVal) * size.height * 0.9f
+                            val uHeight = (item.upload / maxVal) * size.height * 0.9f
+                            drawRect(
+                                color = accentBlue,
+                                topLeft = Offset(xStart, size.height - dHeight),
+                                size = Size(barW, dHeight)
+                            )
+                            drawRect(
+                                color = orangeUpload,
+                                topLeft = Offset(xStart + barW + 3f, size.height - uHeight),
+                                size = Size(barW, uHeight)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Payment History
+        item {
+            Text("Payment History", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
         }
 
         if (data.payments.isEmpty()) {
             item {
                 Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(glassCard)
-                        .padding(20.dp),
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(glassCard).padding(18.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No recent payment rows parsed", color = Color.Gray, fontSize = 13.sp)
+                    Text("Syncing payment history...", color = Color.Gray, fontSize = 13.sp)
                 }
             }
         } else {
             items(data.payments) { pay ->
+                val amountDisplay = if (pay.receive != "0" && pay.receive.isNotEmpty()) "+৳ ${pay.receive}" else "৳ ${pay.bill}"
+                val amountColor = if (pay.receive != "0" && pay.receive.isNotEmpty()) greenOnline else Color(0xFFFBBF24)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -576,10 +697,10 @@ fun DashboardTab(
                 ) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(pay.date, color = Color.Gray, fontSize = 12.sp)
-                        Text(pay.amount, color = greenOnline, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(amountDisplay, color = amountColor, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(pay.remarks, color = Color.White, fontSize = 13.sp)
+                    Text(pay.remarks, color = Color.White, fontSize = 12.sp)
                 }
             }
         }
@@ -588,7 +709,7 @@ fun DashboardTab(
 
 @Composable
 fun ReportTab(
-    data: DashboardData,
+    data: PlusnetState,
     glassCard: Color,
     glassBorder: Color,
     accentBlue: Color,
@@ -600,25 +721,21 @@ fun ReportTab(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("Live Bandwidth & Session Usage", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text("Auto-updating every 8 seconds in background", color = Color.Gray, fontSize = 12.sp)
+            Text("Session Usage & Live Speed", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("Real-time data fetched from /customer/report", color = Color.Gray, fontSize = 12.sp)
         }
-
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatCard("Download Speed", data.downSpeed, Icons.Default.CloudDownload, accentBlue, glassCard, glassBorder, Modifier.weight(1f))
                 StatCard("Upload Speed", data.upSpeed, Icons.Default.CloudUpload, accentPurple, glassCard, glassBorder, Modifier.weight(1f))
             }
         }
-
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatCard("Session Download", data.sessionDownload, Icons.Default.DataUsage, greenOnline, glassCard, glassBorder, Modifier.weight(1f))
-                StatCard("Session Upload", data.sessionUpload, Icons.Default.UploadFile, Color(0xFFFBBF24), glassCard, glassBorder, Modifier.weight(1f))
+                StatCard("Session Upload", data.sessionUpload, Icons.Default.UploadFile, Color(0xFFF97316), glassCard, glassBorder, Modifier.weight(1f))
             }
         }
-
-        // Native Live Speed Graph
         item {
             Column(
                 modifier = Modifier
@@ -629,31 +746,118 @@ fun ReportTab(
                     .padding(18.dp)
             ) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Real-Time Speed Graph", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Text("LIVE", color = greenOnline, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text("Live Speed Graph", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text("● LIVE", color = greenOnline, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Canvas(modifier = Modifier.fillMaxWidth().height(160.dp)) {
-                    val points = data.speedHistory
-                    if (points.size > 1) {
-                        val maxVal = (points.maxOrNull() ?: 100f).coerceAtLeast(10f)
-                        val stepX = size.width / (points.size - 1)
+                    val pts = data.liveSpeedHistory
+                    if (pts.size > 1) {
+                        val maxV = (pts.maxOrNull() ?: 50f).coerceAtLeast(10f)
+                        val stepX = size.width / (pts.size - 1)
                         val path = Path()
-
-                        points.forEachIndexed { idx, value ->
-                            val x = idx * stepX
-                            val y = size.height - ((value / maxVal) * size.height * 0.85f) - 10f
-                            if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        pts.forEachIndexed { i, v ->
+                            val x = i * stepX
+                            val y = size.height - ((v / maxV) * size.height * 0.85f) - 10f
+                            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                             drawCircle(color = accentBlue, radius = 6f, center = Offset(x, y))
                         }
-                        drawPath(
-                            path = path,
-                            color = accentBlue,
-                            style = Stroke(width = 5f, cap = StrokeCap.Round)
-                        )
+                        drawPath(path = path, color = accentBlue, style = Stroke(width = 5f, cap = StrokeCap.Round))
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun ProfileTab(
+    data: PlusnetState,
+    glassCard: Color,
+    glassBorder: Color,
+    accentBlue: Color,
+    accentPurple: Color,
+    greenOnline: Color
+) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(22.dp))
+                .background(glassCard)
+                .border(1.dp, glassBorder, RoundedCornerShape(22.dp))
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .background(Brush.linearGradient(listOf(accentBlue, accentPurple))),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Person, contentDescription = null, tint = Color.White, modifier = Modifier.size(38.dp))
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(data.fullName, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            if (data.email.isNotEmpty()) {
+                Text(data.email, color = accentBlue, fontSize = 13.sp)
+            }
+        }
+
+        ProfileInfoRow("User Name", data.userName, Icons.Default.Badge, accentBlue, glassCard, glassBorder)
+        ProfileInfoRow("Mobile Number", data.mobile.ifEmpty { "--" }, Icons.Default.PhoneAndroid, greenOnline, glassCard, glassBorder)
+
+        // Customer ID with Copy Button
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(glassCard)
+                .border(1.dp, glassBorder, RoundedCornerShape(16.dp))
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Fingerprint, contentDescription = null, tint = accentPurple, modifier = Modifier.size(22.dp))
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text("Customer ID", color = Color.Gray, fontSize = 12.sp)
+                    Text(data.customerId.ifEmpty { "--" }, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
+            }
+            IconButton(onClick = {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("Customer ID", data.customerId))
+                Toast.makeText(context, "Customer ID Copied", Toast.LENGTH_SHORT).show()
+            }) {
+                Icon(Icons.Default.ContentCopy, contentDescription = "Copy ID", tint = accentBlue)
+            }
+        }
+    }
+}
+
+@Composable
+fun ProfileInfoRow(label: String, value: String, icon: ImageVector, tint: Color, bg: Color, border: Color) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(16.dp))
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+        Spacer(modifier = Modifier.width(12.dp))
+        Column {
+            Text(label, color = Color.Gray, fontSize = 12.sp)
+            Text(value, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
         }
     }
 }
