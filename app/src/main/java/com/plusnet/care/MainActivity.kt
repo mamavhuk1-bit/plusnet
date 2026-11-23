@@ -13,7 +13,11 @@ import android.webkit.*
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
+import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -136,6 +140,12 @@ fun PlusnetNativeApp() {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var showThemeDialog by remember { mutableStateOf(false) }
     var showNewTicketDialog by remember { mutableStateOf(false) }
+    var showSplash by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        delay(1600)
+        showSplash = false
+    }
     var selectedTicketDetail by remember { mutableStateOf<TicketItem?>(null) }
     var ticketConversation by remember { mutableStateOf<String?>(null) }
 
@@ -889,6 +899,68 @@ fun PlusnetNativeApp() {
                     }
                 }
             )
+        }
+    
+        // Animated Plusnet Green Logo Splash Overlay
+        AnimatedVisibility(
+            visible = showSplash,
+            exit = fadeOut(animationSpec = tween(450))
+        ) {
+            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+            val pulseScale by infiniteTransition.animateFloat(
+                initialValue = 0.94f,
+                targetValue = 1.06f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(750, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "logoScale"
+            )
+            val glowAlpha by infiniteTransition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 0.65f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(750, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "glowAlpha"
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0A0E17)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Box(
+                            modifier = Modifier
+                                .size(132.dp)
+                                .scale(pulseScale)
+                                .clip(RoundedCornerShape(32.dp))
+                                .background(Color(0xFF047835).copy(alpha = glowAlpha))
+                        )
+                        Box(modifier = Modifier.scale(pulseScale)) {
+                            PlusnetGreenLogo(size = 96.dp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(22.dp))
+                    Text(
+                        text = "PLUSNET CARE",
+                        color = Color.White,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.5.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Connecting Self-Care Portal...",
+                        color = Color(0xFF10B981),
+                        fontSize = 12.sp
+                    )
+                }
+            }
         }
     }
 }
