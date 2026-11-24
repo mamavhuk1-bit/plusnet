@@ -17,7 +17,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
-import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,6 +53,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.text.SimpleDateFormat
 import java.util.Locale
 
 data class AppThemeConfig(
@@ -89,6 +91,22 @@ data class TicketCategory(val value: String, val label: String)
 
 fun cleanHtml(raw: String): String {
     return Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString().trim()
+}
+
+fun calculateLiveDuration(startStr: String, nowMillis: Long): String {
+    val formats = listOf("yyyy-MM-dd HH:mm:ss", "dd-MM-yyyy HH:mm:ss", "yyyy/MM/dd HH:mm:ss")
+    for (fmt in formats) {
+        try {
+            val sdf = SimpleDateFormat(fmt, Locale.US)
+            val parsed = sdf.parse(startStr.trim()) ?: continue
+            val diffSec = ((nowMillis - parsed.time) / 1000L).coerceAtLeast(0L)
+            val hours = diffSec / 3600
+            val mins = (diffSec % 3600) / 60
+            val secs = diffSec % 60
+            return String.format(Locale.US, "%02d:%02d:%02d", hours, mins, secs)
+        } catch (_: Exception) {}
+    }
+    return "00:00:00"
 }
 
 data class PlusnetState(
@@ -131,27 +149,32 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PlusnetNativeApp() {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("plusnet_prefs_v6", Context.MODE_PRIVATE) }
+    val prefs = remember { context.getSharedPreferences("plusnet_prefs_v7", Context.MODE_PRIVATE) }
     var themeIndex by remember { mutableIntStateOf(prefs.getInt("theme_idx", 0).coerceIn(0, AppThemes.lastIndex)) }
     val theme = AppThemes[themeIndex]
 
-    var state by remember { mutableStateOf(PlusnetState()) }
+    var savedUser by remember { mutableStateOf(prefs.getString("auto_user", "") ?: "") }
+    var savedPass by remember { mutableStateOf(prefs.getString("auto_pass", "") ?: "") }
+    val hasSavedCreds = savedUser.isNotEmpty() && savedPass.isNotEmpty()
+
+    var state by remember { mutableStateOf(PlusnetState(isLoggedIn = hasSavedCreds, userName = savedUser)) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var showThemeDialog by remember { mutableStateOf(false) }
     var showNewTicketDialog by remember { mutableStateOf(false) }
-    var showSplash by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        delay(1600)
-        showSplash = false
-    }
     var selectedTicketDetail by remember { mutableStateOf<TicketItem?>(null) }
     var ticketConversation by remember { mutableStateOf<String?>(null) }
+    var showSplash by remember { mutableStateOf(true) }
+    var autoLoginTries by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        delay(1500)
+        showSplash = false
+    }
 
     LaunchedEffect(state.isLoggedIn) {
         while (state.isLoggedIn) {
-            delay(15000)
+            delay(14000)
             if (!showNewTicketDialog && selectedTicketDetail == null) {
                 val target = when (selectedTab) {
                     0 -> "dashboard"
@@ -208,6 +231,10 @@ fun PlusnetNativeApp() {
                                 Icon(Icons.Default.Refresh, contentDescription = "Sync", tint = theme.textPrimary)
                             }
                             IconButton(onClick = {
+                                prefs.edit().remove("auto_user").remove("auto_pass").apply()
+                                savedUser = ""
+                                savedPass = ""
+                                autoLoginTries = 0
                                 CookieManager.getInstance().removeAllCookies(null)
                                 CookieManager.getInstance().flush()
                                 state = PlusnetState(isLoggedIn = false, isSyncing = true)
@@ -307,22 +334,10 @@ fun PlusnetNativeApp() {
                             theme = theme,
                             onOpenNewTicket = {
                                 showNewTicketDialog = true
-                                // Open modal in background WebView to scrape all dynamic select options
                                 val openModalJs = """
                                     (function() {
                                         var btn = Array.from(document.querySelectorAll('button, a')).find(el => el.innerText.includes('Create a New Ticket') || el.innerText.includes('New Ticket'));
                                         if (btn) btn.click();
-                                        setTimeout(function() {
-                                            var cats = [];
-                                            document.querySelectorAll('select option').forEach(function(opt) {
-                                                var v = opt.value;
-                                                var t = opt.innerText.trim();
-                                                if (v && t && !t.toLowerCase().includes('select') && isNaN(t)) {
-                                                    cats.push({ val: v, label: t });
-                                                }
-                                            });
-                                            return JSON.stringify(cats);
-                                        }, 900);
                                     })();
                                 """.trimIndent()
                                 webViewRef?.evaluateJavascript(openModalJs, null)
@@ -358,7 +373,6 @@ fun PlusnetNativeApp() {
                             onTicketClick = { ticket ->
                                 selectedTicketDetail = ticket
                                 ticketConversation = null
-                                // Click row in WebView to fetch full ticket replies/details if available
                                 val clickRowJs = """
                                     (function() {
                                         var rows = Array.from(document.querySelectorAll('table tr'));
@@ -404,7 +418,7 @@ fun PlusnetNativeApp() {
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text("PLUSNET SELF-CARE", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text("Sign in once • Native App will open automatically", color = theme.accent, fontSize = 11.sp)
+                        Text("Sign in once • Auto-Login will stay active", color = theme.accent, fontSize = 11.sp)
                     }
                 }
                 if (state.isSyncing) {
@@ -413,7 +427,7 @@ fun PlusnetNativeApp() {
             }
         }
 
-        // Background / Login WebView
+        // Background / Login WebView with Auto-Capture & Auto-Relogin
         AndroidView(
             modifier = if (!state.isLoggedIn) {
                 Modifier.fillMaxSize().statusBarsPadding().padding(top = 68.dp)
@@ -438,6 +452,17 @@ fun PlusnetNativeApp() {
                         userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                     }
 
+                    addJavascriptInterface(object {
+                        @JavascriptInterface
+                        fun saveCreds(u: String, p: String) {
+                            if (u.isNotBlank() && p.isNotBlank()) {
+                                prefs.edit().putString("auto_user", u.trim()).putString("auto_pass", p.trim()).apply()
+                                savedUser = u.trim()
+                                savedPass = p.trim()
+                            }
+                        }
+                    }, "AndroidAutoAuth")
+
                     webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             state = state.copy(isSyncing = true)
@@ -451,8 +476,65 @@ fun PlusnetNativeApp() {
                             CookieManager.getInstance().flush()
 
                             if (url != null && url.contains("/login")) {
-                                state = state.copy(isLoggedIn = false, isSyncing = false)
+                                val u = prefs.getString("auto_user", "") ?: ""
+                                val p = prefs.getString("auto_pass", "") ?: ""
+
+                                // Hook login form inputs so credentials are saved permanently
+                                val hookJs = """
+                                    (function() {
+                                        var inputs = Array.from(document.querySelectorAll('input'));
+                                        var pIn = inputs.find(i => i.type === 'password');
+                                        var uIn = inputs.find(i => i.type === 'text' || i.type === 'email' || (!i.type && i !== pIn));
+                                        function sync() {
+                                            if (uIn && pIn && uIn.value && pIn.value && window.AndroidAutoAuth) {
+                                                AndroidAutoAuth.saveCreds(uIn.value, pIn.value);
+                                            }
+                                        }
+                                        if (uIn) uIn.addEventListener('input', sync);
+                                        if (pIn) pIn.addEventListener('input', sync);
+                                        var form = document.querySelector('form');
+                                        if (form) form.addEventListener('submit', sync);
+                                        var btn = document.querySelector('button[type="submit"], button');
+                                        if (btn) btn.addEventListener('click', sync);
+                                    })();
+                                """.trimIndent()
+                                view?.evaluateJavascript(hookJs, null)
+
+                                // If credentials exist and we haven't looped > 2 times, Auto-Login silently!
+                                if (u.isNotEmpty() && p.isNotEmpty() && autoLoginTries < 2) {
+                                    autoLoginTries++
+                                    view?.postDelayed({
+                                        val autoFillJs = """
+                                            (function() {
+                                                function setNative(el, val) {
+                                                    var last = el.value;
+                                                    el.value = val;
+                                                    var ev = new Event('input', { bubbles: true });
+                                                    if (el._valueTracker) el._valueTracker.setValue(last);
+                                                    el.dispatchEvent(ev);
+                                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                                }
+                                                var inputs = Array.from(document.querySelectorAll('input'));
+                                                var pIn = inputs.find(i => i.type === 'password');
+                                                var uIn = inputs.find(i => i.type === 'text' || i.type === 'email' || (!i.type && i !== pIn));
+                                                if (uIn && pIn) {
+                                                    setNative(uIn, ${JSONObject.quote(u)});
+                                                    setNative(pIn, ${JSONObject.quote(p)});
+                                                    setTimeout(function() {
+                                                        var btn = document.querySelector('button[type="submit"], input[type="submit"], button');
+                                                        if (btn) btn.click();
+                                                        else if (pIn.form) pIn.form.submit();
+                                                    }, 400);
+                                                }
+                                            })();
+                                        """.trimIndent()
+                                        view.evaluateJavascript(autoFillJs, null)
+                                    }, 800)
+                                } else {
+                                    state = state.copy(isLoggedIn = false, isSyncing = false)
+                                }
                             } else if (url != null && url.contains("/dashboard")) {
+                                autoLoginTries = 0
                                 state = state.copy(isLoggedIn = true)
                                 view?.postDelayed({
                                     val dashJs = """
@@ -575,7 +657,7 @@ fun PlusnetNativeApp() {
                                             state = state.copy(isSyncing = false)
                                         }
                                     }
-                                }, 2000)
+                                }, 1800)
                             } else if (url != null && url.contains("/report")) {
                                 view?.postDelayed({
                                     val reportJs = """
@@ -646,7 +728,7 @@ fun PlusnetNativeApp() {
                                             state = state.copy(isSyncing = false)
                                         }
                                     }
-                                }, 2000)
+                                }, 1800)
                             } else if (url != null && url.contains("/customerhistory")) {
                                 view?.postDelayed({
                                     val histJs = """
@@ -686,7 +768,7 @@ fun PlusnetNativeApp() {
                                             state = state.copy(isSyncing = false)
                                         }
                                     }
-                                }, 2000)
+                                }, 1800)
                             } else if (url != null && url.contains("/complainlist")) {
                                 view?.postDelayed({
                                     val complainJs = """
@@ -757,7 +839,7 @@ fun PlusnetNativeApp() {
                                             state = state.copy(isSyncing = false)
                                         }
                                     }
-                                }, 2000)
+                                }, 1800)
                             }
                         }
                     }
@@ -813,7 +895,7 @@ fun PlusnetNativeApp() {
             )
         }
 
-        // Ticket Detail Dialog (View Completed/Active Ticket Details)
+        // Ticket Detail Dialog
         selectedTicketDetail?.let { ticket ->
             val isCompleted = ticket.status.contains("COMPLET", ignoreCase = true)
             val badgeColor = if (isCompleted) Color(0xFF10B981) else Color(0xFFF59E0B)
@@ -900,18 +982,18 @@ fun PlusnetNativeApp() {
                 }
             )
         }
-    
+
         // Animated Plusnet Green Logo Splash Overlay
         AnimatedVisibility(
             visible = showSplash,
-            exit = fadeOut(animationSpec = tween(450))
+            exit = fadeOut(animationSpec = tween(400))
         ) {
             val infiniteTransition = rememberInfiniteTransition(label = "pulse")
             val pulseScale by infiniteTransition.animateFloat(
                 initialValue = 0.94f,
                 targetValue = 1.06f,
                 animationSpec = infiniteRepeatable(
-                    animation = tween(750, easing = FastOutSlowInEasing),
+                    animation = tween(700, easing = FastOutSlowInEasing),
                     repeatMode = RepeatMode.Reverse
                 ),
                 label = "logoScale"
@@ -920,7 +1002,7 @@ fun PlusnetNativeApp() {
                 initialValue = 0.25f,
                 targetValue = 0.65f,
                 animationSpec = infiniteRepeatable(
-                    animation = tween(750, easing = FastOutSlowInEasing),
+                    animation = tween(700, easing = FastOutSlowInEasing),
                     repeatMode = RepeatMode.Reverse
                 ),
                 label = "glowAlpha"
@@ -1058,7 +1140,6 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
             }
         }
 
-        // Daily Bar Chart WITH Month Title on Top & Date Labels on Bottom
         item {
             Column(
                 modifier = Modifier
@@ -1106,7 +1187,6 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
                             textAlign = Paint.Align.CENTER
                         }
 
-                        // Y-Axis GB Scale
                         drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.0fG", maxVal), 0f, 24f, axisPaint)
                         drawContext.canvas.nativeCanvas.drawText(String.format(Locale.US, "%.0fG", maxVal / 2f), 0f, chartH / 2f + 8f, axisPaint)
                         drawContext.canvas.nativeCanvas.drawText("0", 18f, chartH, axisPaint)
@@ -1118,7 +1198,6 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
                             drawRect(Color(0xFF38BDF8), Offset(xStart, chartH - dHeight), Size(barW, dHeight))
                             drawRect(Color(0xFFF97316), Offset(xStart + barW + 2f, chartH - uHeight), Size(barW, uHeight))
 
-                            // Short Date Label under each bar (e.g. 07/11)
                             val shortDate = if (item.label.length >= 5) item.label.take(5) else item.label
                             drawContext.canvas.nativeCanvas.drawText(
                                 shortDate,
@@ -1197,6 +1276,15 @@ fun PaymentHistoryTab(data: PlusnetState, theme: AppThemeConfig) {
 
 @Composable
 fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
+    // 1-second live ticking clock for Active Session duration
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -1262,7 +1350,7 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
         }
 
         item {
-            Text("Session Log (Previous & Current Sessions)", color = theme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+            Text("Session Log (Live & Previous Sessions)", color = theme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
         }
 
         if (data.sessionLogs.isEmpty()) {
@@ -1277,6 +1365,12 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
         } else {
             items(data.sessionLogs) { sess ->
                 val isCurrent = sess.discDate.contains("Active", ignoreCase = true) || sess.discDate.isBlank()
+                val displaySessionTime = if (isCurrent) {
+                    calculateLiveDuration(sess.connDate, nowMillis)
+                } else {
+                    sess.duration.ifEmpty { "00:00:00" }
+                }
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1285,9 +1379,10 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                         .border(1.dp, if (isCurrent) Color(0xFF10B981) else theme.border, RoundedCornerShape(16.dp))
                         .padding(14.dp)
                 ) {
+                    // Top Row: Status on Left, Download/Upload on Right
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = if (isCurrent) "● ACTIVE SESSION" else "Session Time: ${sess.duration}",
+                            text = if (isCurrent) "● ACTIVE SESSION" else "COMPLETED SESSION",
                             color = if (isCurrent) Color(0xFF10B981) else theme.accent,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
@@ -1295,8 +1390,33 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                         Text("↓ ${sess.download}  |  ↑ ${sess.upload}", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("Start: ${sess.connDate}", color = theme.textSecondary, fontSize = 12.sp)
-                    Text("End:   ${sess.discDate}", color = theme.textSecondary, fontSize = 12.sp)
+                    // Bottom Row: Start/End Dates on Left, LARGE Live Session Timer in the empty bottom-right space
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Column {
+                            Text("Start: ${sess.connDate}", color = theme.textSecondary, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("End:   ${sess.discDate}", color = theme.textSecondary, fontSize = 12.sp)
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = if (isCurrent) "LIVE DURATION" else "SESSION TIME",
+                                color = theme.textSecondary,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = displaySessionTime,
+                                color = if (isCurrent) Color(0xFF10B981) else theme.textPrimary,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
                 }
             }
         }
