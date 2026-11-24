@@ -1,5 +1,6 @@
 package com.plusnet.care
 
+import android.accounts.AccountManager
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -12,7 +13,9 @@ import android.view.ViewGroup
 import android.webkit.*
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeOut
@@ -50,11 +53,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
+
+const val SUPABASE_URL = "https://qwshtbuvvsxehrkomukd.supabase.co"
+const val SUPABASE_ANON_KEY = "sb_publishable_iFwTS5TmnBxIMqJzIcRXcA_MhTMeKJs"
+const val SUPABASE_BUCKET = "plusnet_backups"
 
 data class AppThemeConfig(
     val name: String,
@@ -88,6 +105,7 @@ data class DailyUsage(val label: String, val download: Float, val upload: Float)
 data class SessionLogItem(val connDate: String, val discDate: String, val upload: String, val download: String, val duration: String)
 data class TicketItem(val id: String, val status: String, val title: String, val description: String, val date: String, val assigned: String, val detailUrl: String = "")
 data class TicketCategory(val value: String, val label: String)
+data class CloudFileItem(val name: String, val updatedAt: String)
 
 fun cleanHtml(raw: String): String {
     return Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString().trim()
@@ -136,6 +154,224 @@ data class PlusnetState(
     val ticketCategories: List<TicketCategory> = emptyList()
 )
 
+object SupabaseCloudManager {
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .build()
+
+    fun serializeState(state: PlusnetState, gmail: String): String {
+        val root = JSONObject()
+        root.put("gmail", gmail)
+        root.put("updatedAt", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()))
+        root.put("fullName", state.fullName)
+        root.put("email", state.email)
+        root.put("userName", state.userName)
+        root.put("mobile", state.mobile)
+        root.put("customerId", state.customerId)
+        root.put("packageName", state.packageName)
+        root.put("accountStatus", state.accountStatus)
+        root.put("connectionStatus", state.connectionStatus)
+        root.put("expiryDate", state.expiryDate)
+        root.put("planRate", state.planRate)
+        root.put("chartMonthTitle", state.chartMonthTitle)
+        root.put("monthlyDownGB", state.monthlyDownGB.toDouble())
+        root.put("monthlyUpGB", state.monthlyUpGB.toDouble())
+
+        val dArr = JSONArray()
+        state.dailyUsage.forEach { d ->
+            dArr.put(JSONObject().apply {
+                put("label", d.label)
+                put("download", d.download.toDouble())
+                put("upload", d.upload.toDouble())
+            })
+        }
+        root.put("dailyUsage", dArr)
+
+        val pArr = JSONArray()
+        (state.fullPaymentHistory.ifEmpty { state.dashPayments }).forEach { p ->
+            pArr.put(JSONObject().apply {
+                put("date", p.date)
+                put("bill", p.bill)
+                put("receive", p.receive)
+                put("remarks", p.remarks)
+            })
+        }
+        root.put("payments", pArr)
+
+        val sArr = JSONArray()
+        state.sessionLogs.forEach { s ->
+            sArr.put(JSONObject().apply {
+                put("connDate", s.connDate)
+                put("discDate", s.discDate)
+                put("upload", s.upload)
+                put("download", s.download)
+                put("duration", s.duration)
+            })
+        }
+        root.put("sessionLogs", sArr)
+
+        val tArr = JSONArray()
+        state.tickets.forEach { t ->
+            tArr.put(JSONObject().apply {
+                put("id", t.id)
+                put("status", t.status)
+                put("title", t.title)
+                put("description", t.description)
+                put("date", t.date)
+                put("assigned", t.assigned)
+            })
+        }
+        root.put("tickets", tArr)
+        return root.toString(2)
+    }
+
+    fun deserializeToState(jsonStr: String, current: PlusnetState): PlusnetState {
+        val obj = JSONObject(jsonStr)
+        val dList = mutableListOf<DailyUsage>()
+        obj.optJSONArray("dailyUsage")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val it = arr.getJSONObject(i)
+                dList.add(DailyUsage(it.optString("label"), it.optDouble("download", 0.0).toFloat(), it.optDouble("upload", 0.0).toFloat()))
+            }
+        }
+        val pList = mutableListOf<PaymentItem>()
+        obj.optJSONArray("payments")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val it = arr.getJSONObject(i)
+                pList.add(PaymentItem(it.optString("date"), it.optString("bill"), it.optString("receive"), it.optString("remarks")))
+            }
+        }
+        val sList = mutableListOf<SessionLogItem>()
+        obj.optJSONArray("sessionLogs")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val it = arr.getJSONObject(i)
+                sList.add(SessionLogItem(it.optString("connDate"), it.optString("discDate"), it.optString("upload"), it.optString("download"), it.optString("duration")))
+            }
+        }
+        val tList = mutableListOf<TicketItem>()
+        obj.optJSONArray("tickets")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val it = arr.getJSONObject(i)
+                tList.add(TicketItem(it.optString("id"), it.optString("status"), it.optString("title"), it.optString("description"), it.optString("date"), it.optString("assigned")))
+            }
+        }
+        return current.copy(
+            fullName = obj.optString("fullName").ifEmpty { current.fullName },
+            email = obj.optString("email").ifEmpty { current.email },
+            userName = obj.optString("userName").ifEmpty { current.userName },
+            mobile = obj.optString("mobile").ifEmpty { current.mobile },
+            customerId = obj.optString("customerId").ifEmpty { current.customerId },
+            packageName = obj.optString("packageName").ifEmpty { current.packageName },
+            accountStatus = obj.optString("accountStatus").ifEmpty { current.accountStatus },
+            connectionStatus = obj.optString("connectionStatus").ifEmpty { current.connectionStatus },
+            expiryDate = obj.optString("expiryDate").ifEmpty { current.expiryDate },
+            planRate = obj.optString("planRate").ifEmpty { current.planRate },
+            chartMonthTitle = obj.optString("chartMonthTitle").ifEmpty { current.chartMonthTitle },
+            monthlyDownGB = obj.optDouble("monthlyDownGB", current.monthlyDownGB.toDouble()).toFloat(),
+            monthlyUpGB = obj.optDouble("monthlyUpGB", current.monthlyUpGB.toDouble()).toFloat(),
+            dailyUsage = if (dList.isNotEmpty()) dList else current.dailyUsage,
+            fullPaymentHistory = if (pList.isNotEmpty()) pList else current.fullPaymentHistory,
+            dashPayments = if (pList.isNotEmpty()) pList else current.dashPayments,
+            sessionLogs = if (sList.isNotEmpty()) sList else current.sessionLogs,
+            tickets = if (tList.isNotEmpty()) tList else current.tickets
+        )
+    }
+
+    suspend fun uploadBackup(folderUser: String, gmail: String, state: PlusnetState): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val safeFolder = folderUser.replace(Regex("[^A-Za-z0-9_-]"), "_").ifEmpty { "default_user" }
+            val jsonPayload = serializeState(state, gmail)
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val monthTag = SimpleDateFormat("yyyy_MM", Locale.US).format(Date())
+
+            val paths = listOf(
+                "$safeFolder/latest_backup.json",
+                "$safeFolder/monthly_${monthTag}.json"
+            )
+
+            for (path in paths) {
+                val url = "$SUPABASE_URL/storage/v1/object/$SUPABASE_BUCKET/$path"
+                val req = Request.Builder()
+                    .url(url)
+                    .post(jsonPayload.toRequestBody(mediaType))
+                    .header("apikey", SUPABASE_ANON_KEY)
+                    .header("Authorization", "Bearer $SUPABASE_ANON_KEY")
+                    .header("x-upsert", "true")
+                    .header("Content-Type", "application/json")
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        val err = resp.body?.string() ?: resp.message
+                        return@withContext Result.failure(Exception("Upload failed (${resp.code}): $err"))
+                    }
+                }
+            }
+            val timeNow = SimpleDateFormat("hh:mm:ss a, dd MMM", Locale.US).format(Date())
+            Result.success(timeNow)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun listFolderFiles(folderUser: String): Result<List<CloudFileItem>> = withContext(Dispatchers.IO) {
+        try {
+            val safeFolder = folderUser.replace(Regex("[^A-Za-z0-9_-]"), "_").ifEmpty { "default_user" }
+            val bodyJson = JSONObject().apply {
+                put("prefix", "$safeFolder/")
+                put("limit", 50)
+                put("offset", 0)
+            }.toString()
+
+            val req = Request.Builder()
+                .url("$SUPABASE_URL/storage/v1/object/list/$SUPABASE_BUCKET")
+                .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                .header("apikey", SUPABASE_ANON_KEY)
+                .header("Authorization", "Bearer $SUPABASE_ANON_KEY")
+                .build()
+
+            client.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string() ?: "[]"
+                if (!resp.isSuccessful) return@withContext Result.failure(Exception("List failed: $raw"))
+                val arr = JSONArray(raw)
+                val files = mutableListOf<CloudFileItem>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val name = o.optString("name")
+                    if (name.endsWith(".json")) {
+                        files.add(CloudFileItem(name, o.optString("updated_at", "").take(19).replace("T", " ")))
+                    }
+                }
+                Result.success(files)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun downloadBackup(folderUser: String, fileName: String = "latest_backup.json"): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val safeFolder = folderUser.replace(Regex("[^A-Za-z0-9_-]"), "_").ifEmpty { "default_user" }
+            val url = "$SUPABASE_URL/storage/v1/object/$SUPABASE_BUCKET/$safeFolder/$fileName"
+            val req = Request.Builder()
+                .url(url)
+                .get()
+                .header("apikey", SUPABASE_ANON_KEY)
+                .header("Authorization", "Bearer $SUPABASE_ANON_KEY")
+                .build()
+
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) return@withContext Result.failure(Exception("Restore failed (${resp.code})"))
+                Result.success(body)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -149,12 +385,18 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PlusnetNativeApp() {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("plusnet_prefs_v7", Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
+    val prefs = remember { context.getSharedPreferences("plusnet_prefs_v8", Context.MODE_PRIVATE) }
     var themeIndex by remember { mutableIntStateOf(prefs.getInt("theme_idx", 0).coerceIn(0, AppThemes.lastIndex)) }
     val theme = AppThemes[themeIndex]
 
     var savedUser by remember { mutableStateOf(prefs.getString("auto_user", "") ?: "") }
     var savedPass by remember { mutableStateOf(prefs.getString("auto_pass", "") ?: "") }
+    var connectedGmail by remember { mutableStateOf(prefs.getString("cloud_gmail", "") ?: "") }
+    var lastCloudBackupTime by remember { mutableStateOf(prefs.getString("last_backup_time", "Not backed up yet") ?: "Not backed up yet") }
+    var isCloudBusy by remember { mutableStateOf(false) }
+    var cloudFiles by remember { mutableStateOf<List<CloudFileItem>>(emptyList()) }
+
     val hasSavedCreds = savedUser.isNotEmpty() && savedPass.isNotEmpty()
 
     var state by remember { mutableStateOf(PlusnetState(isLoggedIn = hasSavedCreds, userName = savedUser)) }
@@ -166,10 +408,52 @@ fun PlusnetNativeApp() {
     var ticketConversation by remember { mutableStateOf<String?>(null) }
     var showSplash by remember { mutableStateOf(true) }
     var autoLoginTries by remember { mutableIntStateOf(0) }
+    var lastAutoBackupHash by remember { mutableIntStateOf(0) }
+
+    // Android System Gmail Account Picker Launcher
+    val gmailPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val pickedEmail = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+        if (!pickedEmail.isNullOrBlank()) {
+            connectedGmail = pickedEmail
+            prefs.edit().putString("cloud_gmail", pickedEmail).apply()
+            Toast.makeText(context, "Connected: $pickedEmail", Toast.LENGTH_SHORT).show()
+
+            val folder = state.userName.ifEmpty { savedUser }
+            if (folder.isNotEmpty()) {
+                scope.launch {
+                    isCloudBusy = true
+                    SupabaseCloudManager.uploadBackup(folder, pickedEmail, state).onSuccess { ts ->
+                        lastCloudBackupTime = ts
+                        prefs.edit().putString("last_backup_time", ts).apply()
+                    }
+                    SupabaseCloudManager.listFolderFiles(folder).onSuccess { cloudFiles = it }
+                    isCloudBusy = false
+                }
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         delay(1500)
         showSplash = false
+    }
+
+    // Automatic Cloud Backup whenever fresh portal data is synced & Gmail is connected
+    LaunchedEffect(state.dailyUsage, state.fullPaymentHistory, state.tickets, connectedGmail) {
+        val folder = state.userName.ifEmpty { savedUser }
+        if (state.isLoggedIn && connectedGmail.isNotEmpty() && folder.isNotEmpty() && state.dailyUsage.isNotEmpty()) {
+            val currentHash = (state.monthlyDownGB.toString() + state.fullPaymentHistory.size + state.tickets.size).hashCode()
+            if (currentHash != lastAutoBackupHash) {
+                lastAutoBackupHash = currentHash
+                SupabaseCloudManager.uploadBackup(folder, connectedGmail, state).onSuccess { ts ->
+                    lastCloudBackupTime = ts
+                    prefs.edit().putString("last_backup_time", ts).apply()
+                }
+                SupabaseCloudManager.listFolderFiles(folder).onSuccess { cloudFiles = it }
+            }
+        }
     }
 
     LaunchedEffect(state.isLoggedIn) {
@@ -251,78 +535,56 @@ fun PlusnetNativeApp() {
                         contentColor = theme.textPrimary,
                         modifier = Modifier.navigationBarsPadding()
                     ) {
-                        NavigationBarItem(
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 },
-                            icon = { Icon(Icons.Default.Dashboard, contentDescription = null) },
-                            label = { Text("Home", fontSize = 10.sp) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = theme.accent, selectedTextColor = theme.accent,
-                                indicatorColor = theme.accent.copy(alpha = 0.16f),
-                                unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
-                            )
+                        val navItems = listOf(
+                            Triple("Home", Icons.Default.Dashboard, 0),
+                            Triple("Speed", Icons.Default.Speed, 1),
+                            Triple("Payments", Icons.Default.ReceiptLong, 2),
+                            Triple("Complain", Icons.Default.ConfirmationNumber, 3),
+                            Triple("Cloud", Icons.Default.CloudSync, 4),
+                            Triple("Profile", Icons.Default.AccountCircle, 5)
                         )
-                        NavigationBarItem(
-                            selected = selectedTab == 1,
-                            onClick = {
-                                selectedTab = 1
-                                state = state.copy(isSyncing = true)
-                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/report")
-                            },
-                            icon = { Icon(Icons.Default.Speed, contentDescription = null) },
-                            label = { Text("Speed", fontSize = 10.sp) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = theme.accent, selectedTextColor = theme.accent,
-                                indicatorColor = theme.accent.copy(alpha = 0.16f),
-                                unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
+                        navItems.forEach { (label, icon, idx) ->
+                            NavigationBarItem(
+                                selected = selectedTab == idx,
+                                onClick = {
+                                    selectedTab = idx
+                                    when (idx) {
+                                        1 -> {
+                                            state = state.copy(isSyncing = true)
+                                            webViewRef?.loadUrl("https://care.plus.net.bd/customer/report")
+                                        }
+                                        2 -> {
+                                            state = state.copy(isSyncing = true)
+                                            webViewRef?.loadUrl("https://care.plus.net.bd/customer/customerhistory")
+                                        }
+                                        3 -> {
+                                            state = state.copy(isSyncing = true)
+                                            webViewRef?.loadUrl("https://care.plus.net.bd/customer/complainlist")
+                                        }
+                                        4 -> {
+                                            val folder = state.userName.ifEmpty { savedUser }
+                                            if (folder.isNotEmpty()) {
+                                                scope.launch {
+                                                    SupabaseCloudManager.listFolderFiles(folder).onSuccess { cloudFiles = it }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                icon = { Icon(icon, contentDescription = label, modifier = Modifier.size(20.dp)) },
+                                label = { Text(label, fontSize = 9.sp, maxLines = 1) },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = theme.accent, selectedTextColor = theme.accent,
+                                    indicatorColor = theme.accent.copy(alpha = 0.16f),
+                                    unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
+                                )
                             )
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 2,
-                            onClick = {
-                                selectedTab = 2
-                                state = state.copy(isSyncing = true)
-                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/customerhistory")
-                            },
-                            icon = { Icon(Icons.Default.ReceiptLong, contentDescription = null) },
-                            label = { Text("Payments", fontSize = 10.sp) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = theme.accent, selectedTextColor = theme.accent,
-                                indicatorColor = theme.accent.copy(alpha = 0.16f),
-                                unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
-                            )
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 3,
-                            onClick = {
-                                selectedTab = 3
-                                state = state.copy(isSyncing = true)
-                                webViewRef?.loadUrl("https://care.plus.net.bd/customer/complainlist")
-                            },
-                            icon = { Icon(Icons.Default.ConfirmationNumber, contentDescription = null) },
-                            label = { Text("Complain", fontSize = 10.sp) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = theme.accent, selectedTextColor = theme.accent,
-                                indicatorColor = theme.accent.copy(alpha = 0.16f),
-                                unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
-                            )
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 4,
-                            onClick = { selectedTab = 4 },
-                            icon = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
-                            label = { Text("Profile", fontSize = 10.sp) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = theme.accent, selectedTextColor = theme.accent,
-                                indicatorColor = theme.accent.copy(alpha = 0.16f),
-                                unselectedIconColor = theme.textSecondary, unselectedTextColor = theme.textSecondary
-                            )
-                        )
+                        }
                     }
                 }
             ) { padding ->
                 Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    if (state.isSyncing) {
+                    if (state.isSyncing || isCloudBusy) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = theme.accent, trackColor = theme.card)
                     }
                     when (selectedTab) {
@@ -357,7 +619,7 @@ fun PlusnetNativeApp() {
                                     """.trimIndent()
                                     webViewRef?.evaluateJavascript(readCatsJs) { raw ->
                                         try {
-                                            val arr = org.json.JSONArray(JSONTokener(raw).nextValue().toString())
+                                            val arr = JSONArray(JSONTokener(raw).nextValue().toString())
                                             val list = mutableListOf<TicketCategory>()
                                             for (i in 0 until arr.length()) {
                                                 val o = arr.getJSONObject(i)
@@ -400,7 +662,61 @@ fun PlusnetNativeApp() {
                                 }, 1000)
                             }
                         )
-                        4 -> ProfileTab(state, theme)
+                        4 -> CloudTab(
+                            data = state,
+                            theme = theme,
+                            connectedGmail = connectedGmail,
+                            lastBackupTime = lastCloudBackupTime,
+                            isBusy = isCloudBusy,
+                            cloudFiles = cloudFiles,
+                            onPickGmail = {
+                                val intent = AccountManager.newChooseAccountIntent(
+                                    null, null, arrayOf("com.google"), null, null, null, null
+                                )
+                                gmailPickerLauncher.launch(intent)
+                            },
+                            onDisconnectGmail = {
+                                connectedGmail = ""
+                                prefs.edit().remove("cloud_gmail").apply()
+                            },
+                            onBackupNow = {
+                                val folder = state.userName.ifEmpty { savedUser }
+                                if (connectedGmail.isEmpty()) {
+                                    Toast.makeText(context, "Please pick a Gmail account first", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    scope.launch {
+                                        isCloudBusy = true
+                                        SupabaseCloudManager.uploadBackup(folder, connectedGmail, state)
+                                            .onSuccess { ts ->
+                                                lastCloudBackupTime = ts
+                                                prefs.edit().putString("last_backup_time", ts).apply()
+                                                Toast.makeText(context, "Backed up to $folder/", Toast.LENGTH_SHORT).show()
+                                            }
+                                            .onFailure { err ->
+                                                Toast.makeText(context, err.message ?: "Backup error", Toast.LENGTH_LONG).show()
+                                            }
+                                        SupabaseCloudManager.listFolderFiles(folder).onSuccess { cloudFiles = it }
+                                        isCloudBusy = false
+                                    }
+                                }
+                            },
+                            onRestoreFile = { fileName ->
+                                val folder = state.userName.ifEmpty { savedUser }
+                                scope.launch {
+                                    isCloudBusy = true
+                                    SupabaseCloudManager.downloadBackup(folder, fileName)
+                                        .onSuccess { jsonStr ->
+                                            state = SupabaseCloudManager.deserializeToState(jsonStr, state)
+                                            Toast.makeText(context, "Restored from $folder/$fileName", Toast.LENGTH_SHORT).show()
+                                        }
+                                        .onFailure { err ->
+                                            Toast.makeText(context, err.message ?: "Restore error", Toast.LENGTH_LONG).show()
+                                        }
+                                    isCloudBusy = false
+                                }
+                            }
+                        )
+                        5 -> ProfileTab(state, theme)
                     }
                 }
             }
@@ -418,7 +734,7 @@ fun PlusnetNativeApp() {
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text("PLUSNET SELF-CARE", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text("Sign in once • Auto-Login will stay active", color = theme.accent, fontSize = 11.sp)
+                        Text("Sign in once • Auto-Login & Cloud Sync active", color = theme.accent, fontSize = 11.sp)
                     }
                 }
                 if (state.isSyncing) {
@@ -427,7 +743,7 @@ fun PlusnetNativeApp() {
             }
         }
 
-        // Background / Login WebView with Auto-Capture & Auto-Relogin
+        // Background / Login WebView
         AndroidView(
             modifier = if (!state.isLoggedIn) {
                 Modifier.fillMaxSize().statusBarsPadding().padding(top = 68.dp)
@@ -479,7 +795,6 @@ fun PlusnetNativeApp() {
                                 val u = prefs.getString("auto_user", "") ?: ""
                                 val p = prefs.getString("auto_pass", "") ?: ""
 
-                                // Hook login form inputs so credentials are saved permanently
                                 val hookJs = """
                                     (function() {
                                         var inputs = Array.from(document.querySelectorAll('input'));
@@ -500,7 +815,6 @@ fun PlusnetNativeApp() {
                                 """.trimIndent()
                                 view?.evaluateJavascript(hookJs, null)
 
-                                // If credentials exist and we haven't looped > 2 times, Auto-Login silently!
                                 if (u.isNotEmpty() && p.isNotEmpty() && autoLoginTries < 2) {
                                     autoLoginTries++
                                     view?.postDelayed({
@@ -631,6 +945,7 @@ fun PlusnetNativeApp() {
                                                     usageList.add(DailyUsage(it.optString("label"), it.optDouble("down", 0.0).toFloat(), it.optDouble("up", 0.0).toFloat()))
                                                 }
                                             }
+                                            val fetchedUser = obj.optString("userName").ifEmpty { state.userName }
                                             state = state.copy(
                                                 isLoggedIn = true,
                                                 isSyncing = false,
@@ -641,7 +956,7 @@ fun PlusnetNativeApp() {
                                                 planRate = obj.optString("rate").ifEmpty { state.planRate },
                                                 fullName = obj.optString("fullName").ifEmpty { state.fullName },
                                                 email = obj.optString("email").ifEmpty { state.email },
-                                                userName = obj.optString("userName").ifEmpty { state.userName },
+                                                userName = fetchedUser,
                                                 mobile = obj.optString("mobile").ifEmpty { state.mobile },
                                                 customerId = obj.optString("cid").ifEmpty { state.customerId },
                                                 chartMonthTitle = obj.optString("chartTitle").ifEmpty { state.chartMonthTitle },
@@ -751,7 +1066,7 @@ fun PlusnetNativeApp() {
                                     """.trimIndent()
                                     view.evaluateJavascript(histJs) { raw ->
                                         try {
-                                            val arr = org.json.JSONArray(JSONTokener(raw).nextValue().toString())
+                                            val arr = JSONArray(JSONTokener(raw).nextValue().toString())
                                             val list = mutableListOf<PaymentItem>()
                                             for (i in 0 until arr.length()) {
                                                 val it = arr.getJSONObject(i)
@@ -1048,6 +1363,267 @@ fun PlusnetNativeApp() {
 }
 
 @Composable
+fun CloudTab(
+    data: PlusnetState,
+    theme: AppThemeConfig,
+    connectedGmail: String,
+    lastBackupTime: String,
+    isBusy: Boolean,
+    cloudFiles: List<CloudFileItem>,
+    onPickGmail: () -> Unit,
+    onDisconnectGmail: () -> Unit,
+    onBackupNow: () -> Unit,
+    onRestoreFile: (String) -> Unit
+) {
+    val folderName = data.userName.ifEmpty { "PPG092" }
+    val payments = data.fullPaymentHistory.ifEmpty { data.dashPayments }
+    val receivedPayments = payments.filter { it.receive != "0" && it.receive.isNotEmpty() }
+    val totalPaidTk = receivedPayments.sumOf { it.receive.replace(",", "").toDoubleOrNull() ?: 0.0 }
+    val avgDailyGB = if (data.dailyUsage.isNotEmpty()) {
+        (data.monthlyDownGB + data.monthlyUpGB) / data.dailyUsage.size
+    } else 0f
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Supabase Gmail Connection Card
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Brush.horizontalGradient(listOf(theme.heroStart, theme.heroEnd)))
+                    .border(1.dp, theme.accent.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                    .padding(18.dp)
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.CloudDone, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text("Supabase Cloud Sync", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text("Folder: plusnet_backups/$folderName/", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp)
+                        }
+                    }
+                    Surface(color = Color.White.copy(alpha = 0.2f), shape = RoundedCornerShape(8.dp)) {
+                        Text(
+                            text = if (connectedGmail.isNotEmpty()) "CONNECTED" else "NOT LINKED",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                if (connectedGmail.isEmpty()) {
+                    Button(
+                        onClick = onPickGmail,
+                        modifier = Modifier.fillMaxWidth().height(46.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                    ) {
+                        Icon(Icons.Default.Email, contentDescription = null, tint = Color(0xFF047835))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Pick Gmail from Phone to Connect", color = Color(0xFF047835), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(alpha = 0.25f))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(connectedGmail, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("Last Backup: $lastBackupTime", color = Color(0xFF6EE7B7), fontSize = 11.sp)
+                        }
+                        IconButton(onClick = onDisconnectGmail) {
+                            Icon(Icons.Default.LinkOff, contentDescription = "Unlink", tint = Color(0xFFFCA5A5))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onBackupNow,
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).height(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                        ) {
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF047835), modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Backup Now", color = Color(0xFF047835), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        Button(
+                            onClick = { onRestoreFile("latest_backup.json") },
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).height(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.22f))
+                        ) {
+                            Icon(Icons.Default.CloudDownload, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Restore Latest", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cloud Analytics Summary Cards
+        item {
+            Text("Cloud Usage & Billing Analytics", color = theme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                StatCard(
+                    title = "Daily Avg Usage",
+                    value = String.format(Locale.US, "%.2f GB/d", avgDailyGB),
+                    icon = Icons.Default.Analytics,
+                    tint = Color(0xFF38BDF8),
+                    theme = theme,
+                    modifier = Modifier.weight(1f)
+                )
+                StatCard(
+                    title = "Total Paid (Cloud)",
+                    value = String.format(Locale.US, "৳ %.0f", totalPaidTk),
+                    icon = Icons.Default.Payments,
+                    tint = Color(0xFF10B981),
+                    theme = theme,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        // Monthly Data Usage Analytics Chart
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(theme.card)
+                    .border(1.dp, theme.border, RoundedCornerShape(20.dp))
+                    .padding(16.dp)
+            ) {
+                Text("Monthly Data Consumption (${data.chartMonthTitle})", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text("Download: ${String.format(Locale.US, "%.1f", data.monthlyDownGB)} GB  •  Upload: ${String.format(Locale.US, "%.1f", data.monthlyUpGB)} GB", color = theme.textSecondary, fontSize = 11.sp)
+                Spacer(modifier = Modifier.height(14.dp))
+
+                if (data.dailyUsage.isNotEmpty()) {
+                    val bars = data.dailyUsage.takeLast(10)
+                    val maxVal = bars.maxOfOrNull { it.download + it.upload }?.coerceAtLeast(1f) ?: 100f
+                    Canvas(modifier = Modifier.fillMaxWidth().height(150.dp)) {
+                        val bottomPad = 32f
+                        val chartH = size.height - bottomPad
+                        val stepW = size.width / bars.size
+                        val barW = (stepW * 0.55f).coerceAtLeast(10f)
+                        val datePaint = Paint().apply {
+                            color = android.graphics.Color.LTGRAY
+                            textSize = 20f
+                            isAntiAlias = true
+                            textAlign = Paint.Align.CENTER
+                        }
+                        bars.forEachIndexed { i, item ->
+                            val total = item.download + item.upload
+                            val h = (total / maxVal) * (chartH - 14f)
+                            val x = i * stepW + (stepW - barW) / 2f
+                            drawRect(theme.accent, Offset(x, chartH - h), Size(barW, h))
+                            drawContext.canvas.nativeCanvas.drawText(item.label.take(5), x + barW / 2f, size.height - 4f, datePaint)
+                        }
+                    }
+                } else {
+                    Text("No usage data synced yet.", color = theme.textSecondary, fontSize = 12.sp)
+                }
+            }
+        }
+
+        // Bill Payment Date & Amount Chart
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(theme.card)
+                    .border(1.dp, theme.border, RoundedCornerShape(20.dp))
+                    .padding(16.dp)
+            ) {
+                Text("Bill Payment Dates & Amounts", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Spacer(modifier = Modifier.height(12.dp))
+                if (receivedPayments.isEmpty()) {
+                    Text("No payment records found.", color = theme.textSecondary, fontSize = 12.sp)
+                } else {
+                    val maxPay = receivedPayments.maxOfOrNull { it.receive.replace(",", "").toFloatOrNull() ?: 0f }?.coerceAtLeast(100f) ?: 1200f
+                    receivedPayments.take(6).forEach { pay ->
+                        val amt = pay.receive.replace(",", "").toFloatOrNull() ?: 0f
+                        val ratio = (amt / maxPay).coerceIn(0.1f, 1f)
+                        Column(modifier = Modifier.padding(vertical = 5.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(pay.date.take(10), color = theme.textSecondary, fontSize = 12.sp)
+                                Text("৳ ${pay.receive}", color = Color(0xFF10B981), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(theme.bg)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(ratio)
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color(0xFF10B981))
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cloud Folder Backups List (Restore any file)
+        if (cloudFiles.isNotEmpty()) {
+            item {
+                Text("Saved Files in $folderName/ Folder", color = theme.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+            items(cloudFiles) { file ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(theme.card)
+                        .border(1.dp, theme.border, RoundedCornerShape(14.dp))
+                        .padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(file.name, color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        if (file.updatedAt.isNotEmpty()) {
+                            Text("Updated: ${file.updatedAt}", color = theme.textSecondary, fontSize = 11.sp)
+                        }
+                    }
+                    TextButton(onClick = { onRestoreFile(file.name) }) {
+                        Text("Restore", color = theme.accent, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun PlusnetGreenLogo(size: androidx.compose.ui.unit.Dp) {
     Box(
         modifier = Modifier
@@ -1276,7 +1852,6 @@ fun PaymentHistoryTab(data: PlusnetState, theme: AppThemeConfig) {
 
 @Composable
 fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
-    // 1-second live ticking clock for Active Session duration
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -1379,7 +1954,6 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                         .border(1.dp, if (isCurrent) Color(0xFF10B981) else theme.border, RoundedCornerShape(16.dp))
                         .padding(14.dp)
                 ) {
-                    // Top Row: Status on Left, Download/Upload on Right
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = if (isCurrent) "● ACTIVE SESSION" else "COMPLETED SESSION",
@@ -1390,7 +1964,6 @@ fun ReportTab(data: PlusnetState, theme: AppThemeConfig) {
                         Text("↓ ${sess.download}  |  ↑ ${sess.upload}", color = theme.textPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    // Bottom Row: Start/End Dates on Left, LARGE Live Session Timer in the empty bottom-right space
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
