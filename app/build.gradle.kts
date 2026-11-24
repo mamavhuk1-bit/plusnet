@@ -9,11 +9,24 @@ android {
         applicationId = "com.plusnet.care"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
-        versionName = "3.0-Cloud"
+        versionCode = 6
+        versionName = "3.1-Cloud"
+    }
+    signingConfigs {
+        create("fixedSign") {
+            storeFile = file("keystore/plusnet-release.jks")
+            storePassword = "plusnet1234"
+            keyAlias = "plusnet_key"
+            keyPassword = "plusnet1234"
+        }
     }
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("fixedSign")
+            isMinifyEnabled = false
+        }
         release {
+            signingConfig = signingConfigs.getByName("fixedSign")
             isMinifyEnabled = false
         }
     }
