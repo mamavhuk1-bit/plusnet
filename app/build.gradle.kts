@@ -9,8 +9,8 @@ android {
         applicationId = "com.plusnet.care"
         minSdk = 24
         targetSdk = 35
-        versionCode = 7
-        versionName = "3.2-Cloud"
+        versionCode = 8
+        versionName = "3.3-Cloud"
     }
     signingConfigs {
         create("fixedSign") {

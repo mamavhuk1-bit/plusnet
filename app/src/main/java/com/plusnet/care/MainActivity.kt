@@ -217,7 +217,7 @@ object SupabaseUsageManager {
                         for (i in 0 until arr.length()) {
                             val item = arr.getJSONObject(i)
                             val lbl = item.optString("date")
-                            if (lbl.isNotEmpty()) {
+                            if (lbl.matches(Regex("^\\d{1,2}/\\d{1,2}.*"))) {
                                 mergedMap[lbl] = DailyUsage(
                                     label = lbl,
                                     download = item.optDouble("downloadGB", 0.0).toFloat(),
@@ -322,18 +322,21 @@ object SupabaseUsageManager {
                     obj.optJSONArray("dailyRecords")?.let { rArr ->
                         for (j in 0 until rArr.length()) {
                             val r = rArr.getJSONObject(j)
-                            records.add(
-                                DailyUsage(
-                                    label = r.optString("date"),
-                                    download = r.optDouble("downloadGB", 0.0).toFloat(),
-                                    upload = r.optDouble("uploadGB", 0.0).toFloat()
+                            val dLbl = r.optString("date")
+                            if (dLbl.matches(Regex("^\\d{1,2}/\\d{1,2}.*"))) {
+                                records.add(
+                                    DailyUsage(
+                                        label = dLbl,
+                                        download = r.optDouble("downloadGB", 0.0).toFloat(),
+                                        upload = r.optDouble("uploadGB", 0.0).toFloat()
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
-                    val dSum = obj.optDouble("totalDownloadGB", 0.0).toFloat()
-                    val uSum = obj.optDouble("totalUploadGB", 0.0).toFloat()
-                    val gSum = obj.optDouble("grandTotalGB", (dSum + uSum).toDouble()).toFloat()
+                    val dSum = records.sumOf { it.download.toDouble() }.toFloat()
+                    val uSum = records.sumOf { it.upload.toDouble() }.toFloat()
+                    val gSum = dSum + uSum
 
                     archives.add(
                         MonthlyUsageArchive(
@@ -868,23 +871,27 @@ fun PlusnetNativeApp() {
 
                                             var chartData = [];
                                             var totalD = 0, totalU = 0;
-                                            if (window.Highcharts && Highcharts.charts) {
+                                            if (window.Highcharts && Highcharts.charts && window.location.pathname.includes('/dashboard')) {
                                                 Highcharts.charts.forEach(function(c) {
-                                                    if (c && c.series && c.series.length >= 1) {
+                                                    if (c && c.series && c.series.length >= 2) {
                                                         var cats = (c.xAxis && c.xAxis[0] && c.xAxis[0].categories) ? c.xAxis[0].categories : [];
-                                                        var s0 = c.series[0].data || [];
-                                                        var s1 = (c.series.length > 1) ? c.series[1].data : [];
-                                                        for (var k = 0; k < s0.length; k++) {
-                                                            var dVal = s0[k].y || 0;
-                                                            var uVal = (s1[k] ? (s1[k].y || 0) : 0);
-                                                            totalD += dVal;
-                                                            totalU += uVal;
-                                                            var rawCat = cats[k] || s0[k].category || s0[k].name || ("" + (k+1));
-                                                            chartData.push({
-                                                                label: String(rawCat),
-                                                                down: dVal,
-                                                                up: uVal
-                                                            });
+                                                        if (cats.length > 0 && /^\d{1,2}\/\d{1,2}/.test(String(cats[0]))) {
+                                                            var s0 = c.series[0].data || [];
+                                                            var s1 = c.series[1].data || [];
+                                                            for (var k = 0; k < s0.length; k++) {
+                                                                var lbl = String(cats[k] || "");
+                                                                if (/^\d{1,2}\/\d{1,2}/.test(lbl)) {
+                                                                    var dVal = Number(s0[k].y) || 0;
+                                                                    var uVal = Number(s1[k] ? s1[k].y : 0) || 0;
+                                                                    totalD += dVal;
+                                                                    totalU += uVal;
+                                                                    chartData.push({
+                                                                        label: lbl,
+                                                                        down: dVal,
+                                                                        up: uVal
+                                                                    });
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 });
