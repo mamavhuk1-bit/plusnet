@@ -1628,6 +1628,230 @@ fun PlusnetGreenLogo(size: androidx.compose.ui.unit.Dp) {
     }
 }
 
+
+@Composable
+fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
+    val infiniteTransition = rememberInfiniteTransition(label = "netStatusAnim")
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1300, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "wavePulse"
+    )
+    val blinkAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(650, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alertBlink"
+    )
+
+    if (isOnline) {
+        val onlineGreen = Color(0xFF10B981)
+        val wifiCyan = Color(0xFF38BDF8)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(Color(0xFF052E16), Color(0xFF0F172A))
+                    )
+                )
+                .border(1.5.dp, onlineGreen.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
+                .padding(18.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .scale(0.85f + (blinkAlpha * 0.3f))
+                                .clip(CircleShape)
+                                .background(onlineGreen)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "ONLINE",
+                            color = onlineGreen,
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 1.2.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "ইন্টারনেট চলছে • হাই-স্পিড কানেকশন সচল",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Animated 6GHz Wi-Fi Signal Wave Canvas
+                Canvas(modifier = Modifier.size(64.dp)) {
+                    val cx = size.width / 2f
+                    val cy = size.height * 0.78f
+                    drawCircle(color = onlineGreen, radius = 7f, center = Offset(cx, cy))
+
+                    for (ring in 1..3) {
+                        val animProgress = ((pulse + (ring * 0.3f)) % 1f)
+                        val radius = 16f * ring + (animProgress * 6f)
+                        val alpha = (1f - (ring * 0.22f)) * (0.5f + 0.5f * blinkAlpha)
+                        drawArc(
+                            color = wifiCyan.copy(alpha = alpha.coerceIn(0.15f, 1f)),
+                            startAngle = 225f,
+                            sweepAngle = 90f,
+                            useCenter = false,
+                            topLeft = Offset(cx - radius, cy - radius),
+                            size = Size(radius * 2f, radius * 2f),
+                            style = Stroke(width = 5f, cap = StrokeCap.Round)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    color = wifiCyan.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.Wifi, contentDescription = null, tint = wifiCyan, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Wi-Fi Signal: 6GHz", color = wifiCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+
+                Surface(
+                    color = onlineGreen.copy(alpha = 0.18f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.Bolt, contentDescription = null, tint = onlineGreen, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("PING: 1ms", color = onlineGreen, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    } else {
+        val alertRed = Color(0xFFEF4444)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(Color(0xFF450A0A), Color(0xFF1F070A))
+                    )
+                )
+                .border(2.dp, alertRed.copy(alpha = blinkAlpha), RoundedCornerShape(20.dp))
+                .padding(18.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = "Fiber Cut Warning",
+                    tint = alertRed.copy(alpha = blinkAlpha),
+                    modifier = Modifier.size(34.dp)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "No Laser - Fiber Cut Detected",
+                        color = alertRed,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "ইন্টারনেট নাই • ফাইবার কাট হয়েছে",
+                        color = Color(0xFFFCA5A5),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Animated Broken Optical Fiber Laser Canvas
+            Canvas(modifier = Modifier.fillMaxWidth().height(36.dp)) {
+                val midY = size.height / 2f
+                val leftEnd = size.width * 0.43f
+                val rightStart = size.width * 0.57f
+                val centerX = size.width / 2f
+
+                // Left Optical Fiber Segment
+                drawLine(
+                    color = alertRed.copy(alpha = 0.45f),
+                    start = Offset(12f, midY),
+                    end = Offset(leftEnd, midY),
+                    strokeWidth = 6f,
+                    cap = StrokeCap.Round
+                )
+                // Traveling Broken Laser Dot on Left Fiber
+                val dotX = 12f + (leftEnd - 12f) * pulse
+                drawCircle(color = Color(0xFFF87171), radius = 8f, center = Offset(dotX, midY))
+
+                // Right Optical Fiber Segment (Dead / Dimmed)
+                drawLine(
+                    color = Color.Gray.copy(alpha = 0.35f),
+                    start = Offset(rightStart, midY),
+                    end = Offset(size.width - 12f, midY),
+                    strokeWidth = 6f,
+                    cap = StrokeCap.Round
+                )
+
+                // Blinking Red Cut Cross (X) in the Middle
+                val crossSize = 12f
+                drawLine(
+                    color = alertRed.copy(alpha = blinkAlpha),
+                    start = Offset(centerX - crossSize, midY - crossSize),
+                    end = Offset(centerX + crossSize, midY + crossSize),
+                    strokeWidth = 6f,
+                    cap = StrokeCap.Round
+                )
+                drawLine(
+                    color = alertRed.copy(alpha = blinkAlpha),
+                    start = Offset(centerX + crossSize, midY - crossSize),
+                    end = Offset(centerX - crossSize, midY + crossSize),
+                    strokeWidth = 6f,
+                    cap = StrokeCap.Round
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
     val isOnline = data.connectionStatus.contains("ONLINE", ignoreCase = true)
@@ -1664,6 +1888,10 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
                     }
                 }
             }
+        }
+
+        item {
+            AnimatedNetworkStatusCard(isOnline = isOnline, theme = theme)
         }
 
         item {
