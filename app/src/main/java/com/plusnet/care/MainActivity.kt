@@ -1800,7 +1800,7 @@ fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
                     ) {
                         Icon(Icons.Default.SettingsInputHdmi, contentDescription = null, tint = fiberCyan, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Fiber: GPON Active", color = fiberCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("Optical Fiber: Active", color = fiberCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
 
