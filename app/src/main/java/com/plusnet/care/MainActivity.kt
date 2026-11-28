@@ -1631,29 +1631,29 @@ fun PlusnetGreenLogo(size: androidx.compose.ui.unit.Dp) {
 
 @Composable
 fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
-    val infiniteTransition = rememberInfiniteTransition(label = "netStatusAnim")
+    val infiniteTransition = rememberInfiniteTransition(label = "fiberStatusAnim")
     val pulse by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1300, easing = LinearEasing),
+            animation = tween(1400, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "wavePulse"
+        label = "laserFlow"
     )
     val blinkAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.35f,
+        initialValue = 0.4f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(650, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "alertBlink"
+        label = "nodeBlink"
     )
 
     if (isOnline) {
         val onlineGreen = Color(0xFF10B981)
-        val wifiCyan = Color(0xFF38BDF8)
+        val fiberCyan = Color(0xFF38BDF8)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1675,7 +1675,7 @@ fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(12.dp)
+                                .size(11.dp)
                                 .scale(0.85f + (blinkAlpha * 0.3f))
                                 .clip(CircleShape)
                                 .background(onlineGreen)
@@ -1684,61 +1684,123 @@ fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
                         Text(
                             text = "ONLINE",
                             color = onlineGreen,
-                            fontSize = 26.sp,
+                            fontSize = 24.sp,
                             fontWeight = FontWeight.ExtraBold,
                             letterSpacing = 1.2.sp
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "ইন্টারনেট চলছে • হাই-স্পিড কানেকশন সচল",
+                        text = "Optical Fiber Link Active • Internet Running",
                         color = Color.White,
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
 
-                // Animated 6GHz Wi-Fi Signal Wave Canvas
-                Canvas(modifier = Modifier.size(64.dp)) {
-                    val cx = size.width / 2f
-                    val cy = size.height * 0.78f
-                    drawCircle(color = onlineGreen, radius = 7f, center = Offset(cx, cy))
-
-                    for (ring in 1..3) {
-                        val animProgress = ((pulse + (ring * 0.3f)) % 1f)
-                        val radius = 16f * ring + (animProgress * 6f)
-                        val alpha = (1f - (ring * 0.22f)) * (0.5f + 0.5f * blinkAlpha)
-                        drawArc(
-                            color = wifiCyan.copy(alpha = alpha.coerceIn(0.15f, 1f)),
-                            startAngle = 225f,
-                            sweepAngle = 90f,
-                            useCenter = false,
-                            topLeft = Offset(cx - radius, cy - radius),
-                            size = Size(radius * 2f, radius * 2f),
-                            style = Stroke(width = 5f, cap = StrokeCap.Round)
-                        )
-                    }
+                Surface(
+                    color = onlineGreen.copy(alpha = 0.18f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "PON UP",
+                        color = onlineGreen,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
+
+            // Live ONU <==> ISP Optical Fiber Laser Flow Animation
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // ONU Node
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(onlineGreen.copy(alpha = 0.2f))
+                            .border(1.dp, onlineGreen, RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Router, contentDescription = "ONU", tint = onlineGreen, modifier = Modifier.size(22.dp))
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("ONU", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+
+                // Animated Fiber Line between ONU and ISP
+                Canvas(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(36.dp)
+                        .padding(horizontal = 8.dp)
+                ) {
+                    val midY = size.height / 2f
+                    val startX = 6f
+                    val endX = size.width - 6f
+                    val span = endX - startX
+
+                    // Base Optical Fiber Core Line
+                    drawLine(
+                        color = onlineGreen.copy(alpha = 0.35f),
+                        start = Offset(startX, midY),
+                        end = Offset(endX, midY),
+                        strokeWidth = 5f,
+                        cap = StrokeCap.Round
+                    )
+
+                    // Downstream Laser Pulse (ISP -> ONU)
+                    val downX = endX - (span * pulse)
+                    drawCircle(color = fiberCyan, radius = 7f, center = Offset(downX, midY))
+                    drawCircle(color = fiberCyan.copy(alpha = 0.35f), radius = 13f, center = Offset(downX, midY))
+
+                    // Upstream Laser Pulse (ONU -> ISP)
+                    val upX = startX + (span * pulse)
+                    drawCircle(color = onlineGreen, radius = 6f, center = Offset(upX, midY))
+                }
+
+                // ISP OLT Server Node
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(fiberCyan.copy(alpha = 0.2f))
+                            .border(1.dp, fiberCyan, RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Dns, contentDescription = "ISP", tint = fiberCyan, modifier = Modifier.size(22.dp))
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("ISP OLT", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Surface(
-                    color = wifiCyan.copy(alpha = 0.16f),
+                    color = fiberCyan.copy(alpha = 0.16f),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
-                        Icon(Icons.Default.Wifi, contentDescription = null, tint = wifiCyan, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.SettingsInputHdmi, contentDescription = null, tint = fiberCyan, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Wi-Fi Signal: 6GHz", color = wifiCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("Fiber: GPON Active", color = fiberCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
 
@@ -1748,7 +1810,7 @@ fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
                     modifier = Modifier.weight(1f)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
@@ -1793,9 +1855,9 @@ fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "ইন্টারনেট নাই • ফাইবার কাট হয়েছে",
+                        text = "Internet Down • Optical Fiber Cut (ONU ✕ ISP)",
                         color = Color(0xFFFCA5A5),
-                        fontSize = 14.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -1803,50 +1865,83 @@ fun AnimatedNetworkStatusCard(isOnline: Boolean, theme: AppThemeConfig) {
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Animated Broken Optical Fiber Laser Canvas
-            Canvas(modifier = Modifier.fillMaxWidth().height(36.dp)) {
-                val midY = size.height / 2f
-                val leftEnd = size.width * 0.43f
-                val rightStart = size.width * 0.57f
-                val centerX = size.width / 2f
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(alertRed.copy(alpha = 0.2f))
+                            .border(1.dp, alertRed, RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Router, contentDescription = "ONU", tint = alertRed, modifier = Modifier.size(20.dp))
+                    }
+                    Text("ONU", color = Color(0xFFFCA5A5), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
 
-                // Left Optical Fiber Segment
-                drawLine(
-                    color = alertRed.copy(alpha = 0.45f),
-                    start = Offset(12f, midY),
-                    end = Offset(leftEnd, midY),
-                    strokeWidth = 6f,
-                    cap = StrokeCap.Round
-                )
-                // Traveling Broken Laser Dot on Left Fiber
-                val dotX = 12f + (leftEnd - 12f) * pulse
-                drawCircle(color = Color(0xFFF87171), radius = 8f, center = Offset(dotX, midY))
+                Canvas(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(36.dp)
+                        .padding(horizontal = 8.dp)
+                ) {
+                    val midY = size.height / 2f
+                    val leftEnd = size.width * 0.42f
+                    val rightStart = size.width * 0.58f
+                    val centerX = size.width / 2f
 
-                // Right Optical Fiber Segment (Dead / Dimmed)
-                drawLine(
-                    color = Color.Gray.copy(alpha = 0.35f),
-                    start = Offset(rightStart, midY),
-                    end = Offset(size.width - 12f, midY),
-                    strokeWidth = 6f,
-                    cap = StrokeCap.Round
-                )
+                    drawLine(
+                        color = alertRed.copy(alpha = 0.45f),
+                        start = Offset(6f, midY),
+                        end = Offset(leftEnd, midY),
+                        strokeWidth = 5f,
+                        cap = StrokeCap.Round
+                    )
+                    val dotX = 6f + (leftEnd - 6f) * pulse
+                    drawCircle(color = Color(0xFFF87171), radius = 7f, center = Offset(dotX, midY))
 
-                // Blinking Red Cut Cross (X) in the Middle
-                val crossSize = 12f
-                drawLine(
-                    color = alertRed.copy(alpha = blinkAlpha),
-                    start = Offset(centerX - crossSize, midY - crossSize),
-                    end = Offset(centerX + crossSize, midY + crossSize),
-                    strokeWidth = 6f,
-                    cap = StrokeCap.Round
-                )
-                drawLine(
-                    color = alertRed.copy(alpha = blinkAlpha),
-                    start = Offset(centerX + crossSize, midY - crossSize),
-                    end = Offset(centerX - crossSize, midY + crossSize),
-                    strokeWidth = 6f,
-                    cap = StrokeCap.Round
-                )
+                    drawLine(
+                        color = Color.Gray.copy(alpha = 0.35f),
+                        start = Offset(rightStart, midY),
+                        end = Offset(size.width - 6f, midY),
+                        strokeWidth = 5f,
+                        cap = StrokeCap.Round
+                    )
+
+                    val crossSize = 11f
+                    drawLine(
+                        color = alertRed.copy(alpha = blinkAlpha),
+                        start = Offset(centerX - crossSize, midY - crossSize),
+                        end = Offset(centerX + crossSize, midY + crossSize),
+                        strokeWidth = 5f,
+                        cap = StrokeCap.Round
+                    )
+                    drawLine(
+                        color = alertRed.copy(alpha = blinkAlpha),
+                        start = Offset(centerX + crossSize, midY - crossSize),
+                        end = Offset(centerX - crossSize, midY + crossSize),
+                        strokeWidth = 5f,
+                        cap = StrokeCap.Round
+                    )
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.Gray.copy(alpha = 0.2f))
+                            .border(1.dp, Color.Gray, RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Dns, contentDescription = "ISP", tint = Color.Gray, modifier = Modifier.size(20.dp))
+                    }
+                    Text("ISP OLT", color = Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
