@@ -1979,7 +1979,7 @@ fun DashboardTab(data: PlusnetState, theme: AppThemeConfig) {
                         }
                     }
                     Surface(color = Color.White.copy(alpha = 0.16f), shape = RoundedCornerShape(14.dp)) {
-                        Text(data.planRate, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                        Text("৳ ${data.planRate.replace("৳", "").trim()} /mo", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
                     }
                 }
             }
